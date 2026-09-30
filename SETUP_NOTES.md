@@ -58,3 +58,11 @@ The dataset lives outside the repo at `C:\Users\wikel\dev\xbd-data\` and every s
   The archive extracts to `train\`. Keep the `.tar` files.
 - `train\` — extracted 2026-09-29 with `tar -xvf train_images_labels_targets.tar` (exit 0, 16,798 entries):
   5,598 images, 5,598 labels, 5,598 targets. The `.tar` was left in place.
+
+## Generated outputs (not tracked; `outputs/` is gitignored)
+
+- Test split: `outputs/data_report.md`, `outputs/stats/`, `outputs/viz/`.
+- Train split (2026-09-29): `outputs/train/data_report.md`, `outputs/train/stats/`, `outputs/train/viz/`, made with
+  `--data-root C:\Users\wikel\dev\xbd-data\train` and `--out` / `--out-dir` pointing under `outputs/train/`.
+  Train: 2,799 tiles, 162,787 buildings, same 10 disasters and same 5 damage strings as test; 516 tiles have no buildings;
+  1 invalid polygon (test had 0).
