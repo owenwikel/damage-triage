@@ -132,8 +132,9 @@ def main():
         "pan_res pre": med[("pan_resolution", "pre")], "pan_res post": med[("pan_resolution", "post")],
     })
     cmp["post/pre pan_res"] = cmp["pan_res post"] / cmp["pan_res pre"]
-    steeper = int((cmp["off-nadir post"] > cmp["off-nadir pre"]).sum())
-    coarser = int((cmp["pan_res post"] > cmp["pan_res pre"]).sum())
+    # 1% tolerance so rounding noise (e.g. 0.5200 vs 0.5199) doesn't count as a difference
+    steeper = int((cmp["off-nadir post"] > cmp["off-nadir pre"] * 1.01).sum())
+    coarser = int((cmp["pan_res post"] > cmp["pan_res pre"] * 1.01).sum())
     L += ["## Pre vs post capture (medians over tiles)\n",
           df_to_markdown(cmp, float_fmt="{:.2f}") + "\n",
           f"The post image has a larger off-nadir angle than the pre image for {steeper} of "

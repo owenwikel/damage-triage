@@ -76,4 +76,4 @@ From each label file's metadata, summarised over that disaster's tiles as min-ma
 | santa-rosa-wildfire | 5.67 | 21.35 | 0.42 | 0.47 | 1.12 |
 | socal-fire | 15.40 | 32.67 | 0.50 | 0.64 | 1.29 |
 
-The post image has a larger off-nadir angle than the pre image for 9 of 10 disasters, and a larger (coarser) `pan_resolution` for 8 of 10. Related findings: pre/post misalignment and the blurrier Mexico post image in `docs/data_quality.md` (sections 6 and 7).
+The post image has a larger off-nadir angle than the pre image for 9 of 10 disasters, and a larger (coarser) `pan_resolution` for 7 of 10. Related findings: pre/post misalignment and the blurrier Mexico post image in `docs/data_quality.md` (sections 6 and 7).
