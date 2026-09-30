@@ -205,7 +205,7 @@ def main():
         percentiles=[0.05, 0.25, 0.5, 0.75, 0.95])
     size_desc.loc["all"] = df["area_px"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95])
 
-    # Per-disaster imbalance: majority real class / minority real class (0 counts -> inf).
+    # Per-disaster imbalance: majority real class / minority real class (0 counts -> NaN, blank).
     real = table[REAL_CLASSES]
     per_disaster = pd.DataFrame({
         "buildings": table["total"],
