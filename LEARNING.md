@@ -442,27 +442,52 @@ Trues (True = 1).
 
 ## 7. `scripts/visualize.py`
 
-**Job:** pick 10 random tiles and draw the pre and post images side by side, with each
-building outlined in its post-disaster damage colour.
+**Job:** pick the most-damaged tiles and draw the pre and post images side by side. The
+before panel has plain white outlines (no hint of the outcome); the after panel colours
+each building by its damage class and has the legend. The figure title gives the tile
+name, disaster and the building count per class.
 
+### Choosing tiles: `select_tiles`
 ```python
-tiles = df[["disaster", "tile_id"]].drop_duplicates().reset_index(drop=True)
-chosen = tiles.iloc[rng.choice(len(tiles), size=..., replace=False)]
+counts = (df.groupby(["disaster", "tile_id", "damage"], observed=True).size()
+            .unstack("damage", fill_value=0)
+            .reindex(columns=DAMAGE_CLASSES, fill_value=0))
 ```
-`df[[...]]` (double brackets) selects several columns and returns a DataFrame.
-`drop_duplicates()` leaves one row per tile. `reset_index(drop=True)` renumbers rows
-0..n-1 so positions and labels agree. Then we pick random positions with `iloc`. Because
-`df` only contains tiles that have buildings, every chosen tile has something to draw.
-Change `--seed` for a different set.
+**Method chaining**: each line works on the previous line's result (the outer parentheses
+let the chain span lines). `groupby([...]).size()` counts buildings per
+(disaster, tile, class), giving a Series with a three-level **MultiIndex**. `unstack("damage")`
+moves the innermost level into columns, so you get one row per tile and one column per
+class; `fill_value=0` fills combinations that never occurred. `reindex(columns=...)` makes
+sure all five class columns exist even if a class is missing from the data.
 
 ```python
-for disaster, tile_id in chosen.itertuples(index=False):
+ranked = counts[cls].sort_values(ascending=False, kind="stable")
+for (disaster, tile_id), count in ranked.items():
+```
+One column, sorted from most to fewest buildings of that class. `kind="stable"` keeps ties
+in their original order, so the selection is the same every run. With a MultiIndex, each
+index label is a tuple, so `.items()` yields `((disaster, tile_id), count)` and the loop
+unpacks it in one go.
+
+The loop then takes tiles greedily: skip a tile if its disaster is already in this group
+or if the tile was picked for an earlier group; stop at the quota or when the count hits 0.
+The defaults are 4 tiles for `destroyed`, 3 for `major-damage` and 3 for `minor-damage`,
+set with `--n-destroyed`, `--n-major` and `--n-minor`. Disasters are distinct *within* a
+group but may repeat *across* groups: minor damage only exists in quantity in three
+hurricanes, so forcing ten different disasters would pick tiles with almost no damage.
+
+```python
+for group, disaster, tile_id, count in chosen:
     tile_df = df[(df["disaster"] == disaster) & (df["tile_id"] == tile_id)]
 ```
-`index=False` leaves the index out of each tuple so it unpacks into exactly two names.
 Filtering the full DataFrame 10 times is fine. For thousands of tiles you'd use
 `for key, tile_df in df.groupby(["disaster", "tile_id"], observed=True):` instead, which
 splits the data once.
+
+### Drawing: `make_figure`
+`make_figure` builds the figure and *returns* it without saving, which lets the tests
+inspect the axes (which images are shown, which outline colours are used, where the
+legend is).
 
 ```python
 pre = np.asarray(Image.open(first["pre_image"]).convert("RGB"))
@@ -487,19 +512,39 @@ keeps that orientation explicit. `img.shape[0]` is the height (rows), `img.shape
 width: rows first again.
 
 ```python
-ax.add_collection(PatchCollection(patches, facecolor="none", edgecolor="white", linewidth=2.8, alpha=0.7))
-ax.add_collection(PatchCollection(patches, facecolor="none", edgecolor=colors, linewidth=1.3))
+ax_pre.add_collection(PatchCollection(patches, facecolor="none", edgecolor=PRE_OUTLINE, linewidth=1.2))
+...
+ax_post.add_collection(PatchCollection(patches, facecolor="none", edgecolor="white", linewidth=2.8, alpha=0.7))
+ax_post.add_collection(PatchCollection(patches, facecolor="none", edgecolor=colors, linewidth=1.3))
 ```
 A `PatchCollection` draws many shapes in one call; it's much faster than adding 1000
-patches one by one. The first, thicker, white layer is a **halo** under the coloured
-outline so that dark outlines (e.g. violet "destroyed") stay visible on dark burned ground.
-The post image also gets a faint fill (`alpha=0.25`) so small buildings are easier to find.
+patches one by one. A matplotlib artist can only belong to one axes, so the patches are
+built twice, once per panel. On the after panel, the thicker white layer is a **halo**
+under the coloured outline so dark outlines (e.g. violet "destroyed") stay visible on dark
+burned ground, and a faint fill (`alpha=0.25`) makes small buildings easier to find.
+
+```python
+leg = ax_post.legend(..., ncols=5)
+leg.set_in_layout(False)
+fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+```
+The legend is one row of five under the after panel. `tight_layout` normally makes room
+for everything, and a wide legend makes it shrink both images. `set_in_layout(False)`
+leaves the legend out of that calculation, and `rect=(left, bottom, right, top)` reserves
+the bottom 5% of the figure for it instead. `test_legend_fits_inside_figure` checks it
+isn't clipped.
+
+### Saving: `save_figure`
+On Windows you can't overwrite a PNG that's open in some image viewers (you get
+`PermissionError` or `OSError: [Errno 22]`). `save_figure` catches `OSError`, tries
+`name_new.png`, `name_new2.png`, ... and returns the path it actually wrote. `main()` lists
+any redirected files at the end so you know which ones to look at.
 
 Things to notice when you open `outputs/viz/`:
 - Many tiles have **black areas**. Those are no-data regions outside the satellite
   swath, not damage. A model will see them as well.
-- The same outline is drawn on both images, so you can check whether it lines up with
-  the building **before** the disaster too. Off-nadir angle differences between the two
+- The white outlines on the before image come from the post label file. Check whether
+  they line up with the buildings there too: differences in viewing angle between the two
   captures can shift buildings by several pixels.
 
 ---
