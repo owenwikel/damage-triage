@@ -56,3 +56,5 @@ The dataset lives outside the repo at `C:\Users\wikel\dev\xbd-data\` and every s
   Checked at 21:11: no curl process running, no writer holding the file, size unchanged for 9 min.
   SHA1 verified: `b37a4ef4ee9c909e2b19d046e49d42ee3965714b` (matches the expected value).
   The archive extracts to `train\`. Keep the `.tar` files.
+- `train\` — extracted 2026-09-29 with `tar -xvf train_images_labels_targets.tar` (exit 0, 16,798 entries):
+  5,598 images, 5,598 labels, 5,598 targets. The `.tar` was left in place.
