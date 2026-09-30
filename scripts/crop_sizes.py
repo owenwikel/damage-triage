@@ -77,7 +77,11 @@ def pick_examples(df, seed, n=6):
         cand = inner[(inner["bbox_side"].between(target * 0.9, target * 1.1)) & (~inner["disaster"].isin(used))]
         pref = cand[cand["damage"] == cls]
         pool = pref if len(pref) else cand
-        row = pool.iloc[rng.integers(len(pool))]
+        if len(pool):
+            row = pool.iloc[rng.integers(len(pool))]
+        else:  # nothing near this size (tiny datasets): take the closest-sized building
+            fallback = inner if len(inner) else df
+            row = fallback.iloc[int((fallback["bbox_side"] - target).abs().to_numpy().argmin())]
         used.add(row["disaster"])
         rows.append((q, row))
     return rows

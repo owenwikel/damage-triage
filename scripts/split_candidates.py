@@ -55,7 +55,11 @@ def assign(df, tiles, cand, seed):
         rng = np.random.default_rng(seed)
         for d in sorted(set(dis[part.to_numpy() == "train"])):
             idx = np.flatnonzero((dis == d) & (part.to_numpy() == "train"))
-            pick = rng.choice(idx, size=max(1, round(frac * len(idx))), replace=False)
+            # at least one tile, but never all of them: the disaster must stay in train
+            k = min(max(1, round(frac * len(idx))), len(idx) - 1)
+            if k <= 0:
+                continue
+            pick = rng.choice(idx, size=k, replace=False)
             part.iloc[pick] = "val-tiles"
     return part
 
