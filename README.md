@@ -4,7 +4,7 @@ Uncertainty-aware building damage assessment on the xBD dataset.
 
 ## Status
 
-Placeholder — project scaffolding in progress. Details to follow.
+Data exploration complete (see [docs/observations.md](docs/observations.md)). Model in development.
 
 ## Layout
 
@@ -13,7 +13,9 @@ Placeholder — project scaffolding in progress. Details to follow.
 - `scripts/` — standalone scripts (training, preprocessing, etc.)
 - `outputs/` — generated artifacts (not tracked in git)
 - `tests/` — test suite
-- `data/` — dataset (not tracked in git; not yet present)
+- `docs/` — design notes: [observations](docs/observations.md), [split proposal](docs/split_proposal.md)
+- Data: the xBD Challenge set from [xview2.org](https://xview2.org), stored outside the repo
+  (scripts take `--data-root`)
 
 ## Setup
 
