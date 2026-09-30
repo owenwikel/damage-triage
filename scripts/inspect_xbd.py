@@ -246,7 +246,9 @@ def main():
         for f in feats:
             pt = shapely_wkt.loads(f["wkt"]).representative_point()
             uncls_vals[int(mask[int(pt.y), int(pt.x)])] += 1
-    L.append("Mask value found inside `un-classified` polygons (up to 50 checked): "
+    # The 50 limit is checked per file, so the last file can push the total past 50.
+    L.append(f"Mask value found inside `un-classified` polygons ({sum(uncls_vals.values())} "
+             "checked, from the first post files containing any, stopping once 50 were reached): "
              + ", ".join(f"value {v}: {n}" for v, n in sorted(uncls_vals.items()))
              + ". A value of 0 means un-classified buildings are painted as background.\n")
 
