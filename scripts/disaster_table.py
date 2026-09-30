@@ -1,0 +1,149 @@
+"""Per-disaster metadata table from the label JSON files -> docs/disasters.md.
+
+Usage:
+    .\\.venv\\Scripts\\python.exe scripts\\disaster_table.py --data-dir C:\\Users\\wikel\\dev\\xbd-data
+
+Uses only what the label files contain (the ``metadata`` block and the building features).
+Pre and post captures are summarised separately. Anything absent is shown as "unknown".
+"""
+
+import argparse
+import json
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.labels import DAMAGE_CLASSES  # noqa: E402
+from src.reporting import df_to_markdown  # noqa: E402
+
+UNKNOWN = "unknown"
+NUMERIC = {"gsd": "gsd (m/px)", "pan_resolution": "pan_resolution (m/px)",
+           "off_nadir_angle": "off-nadir (deg)"}
+
+
+def read_metadata(data_dir, splits):
+    """One row per label file: disaster, phase, metadata values; plus post damage counts."""
+    rows, damage = [], defaultdict(Counter)
+    for split in splits:
+        for p in sorted((data_dir / split / "labels").glob("*_disaster.json")):
+            phase = "post" if p.name.endswith("_post_disaster.json") else "pre"
+            with open(p, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            meta = doc.get("metadata", {})
+            stem = p.name.replace(f"_{phase}_disaster.json", "")
+            disaster = meta.get("disaster") or stem.rsplit("_", 1)[0]
+            rows.append({"split": split, "disaster": disaster, "phase": phase,
+                         "tile": stem, **{k: meta.get(k) for k in
+                                          ("disaster_type", "capture_date", "sensor",
+                                           *NUMERIC)}})
+            if phase == "post":
+                for f in doc.get("features", {}).get("xy", []):
+                    damage[disaster][f["properties"].get("subtype", UNKNOWN)] += 1
+    return pd.DataFrame(rows), damage
+
+
+def date_range(values):
+    dates = sorted({str(v)[:10] for v in values if v})
+    if not dates:
+        return UNKNOWN
+    return dates[0] if dates[0] == dates[-1] else f"{dates[0]} to {dates[-1]}"
+
+
+def num_range(values, fmt="{:.2f}"):
+    v = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if v.empty:
+        return UNKNOWN
+    lo, med, hi = v.min(), v.median(), v.max()
+    return fmt.format(lo) if np.isclose(lo, hi) else f"{fmt.format(lo)}-{fmt.format(hi)} (median {fmt.format(med)})"
+
+
+def categories(values):
+    c = Counter(v for v in values if v)
+    return ", ".join(f"{k} ({n})" for k, n in c.most_common()) if c else UNKNOWN
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--data-dir", required=True, type=Path)
+    ap.add_argument("--splits", nargs="+", default=["train", "test"])
+    ap.add_argument("--out", type=Path, default=Path("docs/disasters.md"))
+    args = ap.parse_args()
+
+    meta, damage = read_metadata(args.data_dir, args.splits)
+    disasters = sorted(meta["disaster"].unique())
+
+    overview = pd.DataFrame(index=pd.Index(disasters, name="disaster"))
+    overview["type"] = [categories(meta.loc[meta.disaster == d, "disaster_type"]) for d in disasters]
+    overview["tiles"] = [meta.loc[(meta.disaster == d) & (meta.phase == "post"), "tile"].nunique()
+                         for d in disasters]
+    for split in args.splits:
+        overview[f"tiles ({split})"] = [meta.loc[(meta.disaster == d) & (meta.phase == "post")
+                                                 & (meta.split == split), "tile"].nunique() for d in disasters]
+    overview["pre capture dates"] = [date_range(meta.loc[(meta.disaster == d) & (meta.phase == "pre"), "capture_date"])
+                                     for d in disasters]
+    overview["post capture dates"] = [date_range(meta.loc[(meta.disaster == d) & (meta.phase == "post"), "capture_date"])
+                                      for d in disasters]
+
+    classes = pd.DataFrame({c: [damage[d].get(c, 0) for d in disasters] for c in DAMAGE_CLASSES},
+                           index=pd.Index(disasters, name="disaster"))
+    other = {d: sum(n for k, n in damage[d].items() if k not in DAMAGE_CLASSES) for d in disasters}
+    if any(other.values()):
+        classes["other/unknown"] = [other[d] for d in disasters]
+    classes["total"] = classes.sum(axis=1)
+
+    imagery = []
+    for d in disasters:
+        for phase in ("pre", "post"):
+            m = meta[(meta.disaster == d) & (meta.phase == phase)]
+            imagery.append({"disaster": d, "phase": phase, "sensor": categories(m["sensor"]),
+                            **{label: num_range(m[key]) for key, label in NUMERIC.items()}})
+    imagery = pd.DataFrame(imagery).set_index("disaster")
+
+    missing = {k: int(meta[k].isna().sum()) for k in ("disaster_type", "capture_date", "sensor", *NUMERIC)}
+
+    L = ["# Disasters in the dataset\n",
+         f"Generated by `scripts/disaster_table.py` from the label JSON files in "
+         f"`{args.data_dir}` (splits: {', '.join(args.splits)}; {len(meta):,} label files). "
+         "Only values present in the files are used; anything absent is shown as "
+         f"'{UNKNOWN}'. Missing values per field across all files: "
+         + ", ".join(f"`{k}` {v}" for k, v in missing.items()) + ".\n",
+         "## Overview\n",
+         "`type` is the label files' `disaster_type` (with file counts). Capture dates are "
+         "the date part of `capture_date`, as a range over all tiles.\n",
+         df_to_markdown(overview) + "\n",
+         "## Buildings per damage class (post label files)\n",
+         df_to_markdown(classes) + "\n",
+         "## Imagery\n",
+         "From each label file's metadata, summarised over that disaster's tiles as "
+         "min-max (median). `sensor` lists values with file counts. The label files don't "
+         "say which band `gsd` refers to; `pan_resolution` is listed separately as given.\n",
+         df_to_markdown(imagery) + "\n",
+         ]
+
+    # Pre vs post, per disaster, from the per-file values (medians over tiles).
+    num = meta.assign(**{k: pd.to_numeric(meta[k], errors="coerce") for k in NUMERIC})
+    med = num.groupby(["disaster", "phase"])[list(NUMERIC)].median().unstack("phase")
+    cmp = pd.DataFrame({
+        "off-nadir pre": med[("off_nadir_angle", "pre")], "off-nadir post": med[("off_nadir_angle", "post")],
+        "pan_res pre": med[("pan_resolution", "pre")], "pan_res post": med[("pan_resolution", "post")],
+    })
+    cmp["post/pre pan_res"] = cmp["pan_res post"] / cmp["pan_res pre"]
+    steeper = int((cmp["off-nadir post"] > cmp["off-nadir pre"]).sum())
+    coarser = int((cmp["pan_res post"] > cmp["pan_res pre"]).sum())
+    L += ["## Pre vs post capture (medians over tiles)\n",
+          df_to_markdown(cmp, float_fmt="{:.2f}") + "\n",
+          f"The post image has a larger off-nadir angle than the pre image for {steeper} of "
+          f"{len(cmp)} disasters, and a larger (coarser) `pan_resolution` for {coarser} of "
+          f"{len(cmp)}. Related findings: pre/post misalignment and the blurrier Mexico post "
+          "image in `docs/data_quality.md` (sections 6 and 7).\n"]
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text("\n".join(L), encoding="utf-8")
+    print(f"Wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
