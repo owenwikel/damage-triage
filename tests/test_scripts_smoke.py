@@ -59,3 +59,29 @@ def test_split_candidates(fake_xbd, tmp_path):
     out = tmp_path / "splits.md"
     run("split_candidates.py", "--data-dir", fake_xbd, "--out", out, cwd=tmp_path)
     assert "No candidate is chosen here" in out.read_text(encoding="utf-8")
+
+
+def test_disaster_table(fake_xbd, tmp_path):
+    out = tmp_path / "disasters.md"
+    run("disaster_table.py", "--data-dir", fake_xbd, "--out", out, cwd=tmp_path)
+    text = out.read_text(encoding="utf-8")
+    assert "| fake-fire | fire (2) | 1 |" in text
+    assert "FAKESAT" in text
+
+
+def test_label_noise_with_no_candidates(fake_xbd, tmp_path):
+    # the synthetic tiles have fewer than k+1 buildings, so nothing is eligible
+    doc = tmp_path / "noise.md"
+    run("label_noise.py", "--data-dir", fake_xbd, "--doc", doc, "--out-dir", tmp_path / "out",
+        cwd=tmp_path)
+    assert "Nothing has been relabelled or removed" in doc.read_text(encoding="utf-8")
+
+
+def test_label_noise_finds_isolated_building(fake_xbd, tmp_path):
+    # with k=1, the destroyed building's nearest classified neighbour is no-damage
+    doc = tmp_path / "noise.md"
+    run("label_noise.py", "--data-dir", fake_xbd, "--doc", doc, "--out-dir", tmp_path / "out",
+        "--k", 1, "--gallery", 2, cwd=tmp_path)
+    csv = (tmp_path / "out" / "candidates.csv").read_text(encoding="utf-8")
+    assert "uid-b" in csv and "uid-a" in csv
+    assert (tmp_path / "out" / "gallery_01.png").exists()
