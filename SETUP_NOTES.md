@@ -66,4 +66,7 @@ The dataset lives outside the repo at `C:\Users\wikel\dev\xbd-data\` and every s
   `--data-root C:\Users\wikel\dev\xbd-data\train` and `--out` / `--out-dir` pointing under `outputs/train/`.
   Train: 2,799 tiles, 162,787 buildings, same 10 disasters and same 5 damage strings as test; 516 tiles have no buildings;
   1 invalid polygon (test had 0).
-- `outputs/split_proposal.md` (2026-09-29): DRAFT disaster-held-out train/val/test proposal (pooled train + test folders). Not final.
+
+## Design docs (tracked in git)
+
+- `docs/split_proposal.md` (2026-09-29): DRAFT disaster-held-out train/val/test proposal (pooled train + test folders). Not final.
