@@ -48,3 +48,11 @@ To run scripts without activating:
 ## Data folder
 
 Per instructions, the `data/` folder was **not** touched (dataset download was still in progress). `data/` is included in `.gitignore` and does not exist in this repo yet — it should be populated separately once the download completes.
+
+The dataset lives outside the repo at `C:\Users\wikel\dev\xbd-data\` and every script takes it via `--data-root`:
+
+- `test\` — extracted from `test_images_labels_targets.tar`; 933 tiles / 1866 images.
+- `train_images_labels_targets.tar` — download finished 2026-09-29 (last write 21:02 EDT, 8,381,754,539 bytes).
+  Checked at 21:11: no curl process running, no writer holding the file, size unchanged for 9 min.
+  SHA1 verified: `b37a4ef4ee9c909e2b19d046e49d42ee3965714b` (matches the expected value).
+  The archive extracts to `train\`. Keep the `.tar` files.
