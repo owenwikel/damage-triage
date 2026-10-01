@@ -122,13 +122,18 @@ def plot_risk_coverage(ax, methods, y_true, title):
 
 
 def plot_inspection(ax, curves, is_damaged, title, budgets=BUDGETS):
-    """Damaged buildings reached vs inspection budget. ``curves`` = {label: priority}."""
+    """Damaged buildings reached vs inspection budget.
+
+    ``curves`` = {label: priority} or {label: (priority, colour, line style)}; the second
+    form lets the caller use colour for the method and line style for the policy.
+    """
     pct = [100 * b for b in budgets]
     ax.plot(pct, [100 * r for r in oracle_recall(is_damaged, budgets)], color="#0b0b0b",
             linestyle=":", linewidth=1.2, label="perfect ranking")
-    for (name, priority), color in zip(curves.items(), METHOD_COLORS[1:]):
+    for (name, value), default in zip(curves.items(), METHOD_COLORS[1:] * 3):
+        priority, color, style = value if isinstance(value, tuple) else (value, default, "-")
         ax.plot(pct, [100 * r for r in inspection_recall(priority, is_damaged, budgets)],
-                marker="o", markersize=3.5, linewidth=1.8, color=color, label=name)
+                marker="o", markersize=3, linewidth=1.6, color=color, linestyle=style, label=name)
     ax.plot(pct, pct, color="#898781", linestyle="--", linewidth=1.2, label="random visits")
     ax.set_xlabel("inspection budget K (% of buildings visited)")
     ax.set_ylabel("% of truly damaged buildings reached")
@@ -136,4 +141,4 @@ def plot_inspection(ax, curves, is_damaged, title, budgets=BUDGETS):
     ax.set_title(title, fontsize=10)
     ax.grid(color="#e1e0d9", linewidth=0.6)
     ax.set_axisbelow(True)
-    ax.legend(fontsize=7.5, frameon=False, loc="lower right")
+    ax.legend(fontsize=6.5, frameon=False, loc="lower right")

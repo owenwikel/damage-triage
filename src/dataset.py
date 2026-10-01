@@ -48,8 +48,8 @@ def read_index(cache_dir, part=None):
     return index
 
 
-def augment_pair(pre, post):
-    """Randomly flip, rotate and slightly recolour a (pre, post) pair. Tensors in [0, 1].
+def augment_pair(pre, post, strength="base"):
+    """Randomly flip, rotate and recolour a (pre, post) pair. Tensors in [0, 1].
 
     Augmentation shows the network altered copies of each example so it cannot simply
     memorise the training images; it has to learn what stays the same under the changes.
@@ -62,12 +62,23 @@ def augment_pair(pre, post):
         arbitrary-angle rotations, which have to blend neighbouring pixels.
       * The SAME flip/rotation must be applied to pre and post. The model compares the
         two images; if they were turned differently, the comparison would be meaningless.
-      * Colour jitter is drawn SEPARATELY for pre and post, and kept light. The two
-        images were taken on different days, often by different satellites, so brightness
-        and contrast already differ between them for reasons unrelated to damage. Small
-        independent changes teach the model not to read "post is a bit darker" as
-        damage. Kept small (about +-10%) because colour can also be real signal: burnt
-        ground and flood water are genuinely darker.
+      * Colour jitter is drawn SEPARATELY for pre and post. The two images were taken on
+        different days, often by different satellites, so brightness and contrast
+        already differ between them for reasons unrelated to damage. Independent changes
+        teach the model not to read "post is a bit darker" as damage.
+
+    Two strengths:
+      "base"    brightness and contrast within about +-10%. Careful, because colour can
+                also be real signal: burnt ground and flood water are genuinely darker.
+      "strong"  the experiment for the val gap (docs/results.md). The first model learned
+                the training disasters but failed on unseen ones, whose images are
+                visibly darker and greener. So: brightness, contrast and saturation
+                within +-30%, a random colour cast (each of red, green, blue scaled by
+                +-10%), and the post image shifted against the pre image by up to 4
+                pixels in each direction, to imitate the misalignment between the two
+                captures (docs/data_quality.md section 6). The bet: if the model cannot
+                rely on exact colours or exact alignment, it has to rely on structure,
+                which should carry over to a new disaster better.
 
     Random numbers come from torch's generator. The DataLoader gives each worker process
     its own seed derived from the run's seed, so the augmentation is reproducible.
@@ -79,16 +90,49 @@ def augment_pair(pre, post):
     k = int(torch.randint(0, 4, (1,)).item())          # 0, 90, 180 or 270 degrees
     if k:
         pre, post = torch.rot90(pre, k, dims=(-2, -1)), torch.rot90(post, k, dims=(-2, -1))
-    return _jitter(pre), _jitter(post)
+    if strength == "strong":
+        post = _shift(post, max_shift=4)
+        return (_jitter(pre, 0.3, saturation=True, cast=0.1),
+                _jitter(post, 0.3, saturation=True, cast=0.1))
+    return _jitter(pre, 0.1), _jitter(post, 0.1)
 
 
-def _jitter(img, strength=0.1):
-    """Scale brightness and contrast by random factors in [1 - strength, 1 + strength]."""
-    brightness, contrast = (1 + strength * (2 * torch.rand(2) - 1)).tolist()
-    mean = img.mean()
+def _jitter(img, strength=0.1, saturation=False, cast=0.0):
+    """Random brightness and contrast (and optionally saturation and a colour cast).
+
+    Every factor is drawn uniformly from [1 - strength, 1 + strength].
+    """
+    brightness, contrast, sat = (1 + strength * (2 * torch.rand(3) - 1)).tolist()
     # contrast: stretch or squeeze values around the image's mean; brightness: scale all
+    mean = img.mean()
     img = ((img - mean) * contrast + mean) * brightness
+    if saturation:
+        # saturation: move every pixel towards (or away from) its own grey value
+        grey = img.mean(dim=0, keepdim=True)
+        img = (img - grey) * sat + grey
+    if cast:
+        # colour cast: scale red, green and blue separately, as a different sensor or a
+        # different time of day would
+        img = img * (1 + cast * (2 * torch.rand(3, 1, 1) - 1))
     return img.clamp(0.0, 1.0)
+
+
+def _shift(img, max_shift=4):
+    """Move the image by a random whole number of pixels, up to ``max_shift`` each way.
+
+    The image is padded by repeating its border pixels and then cut back to its original
+    size at an offset, so nothing wraps around and no black bars appear.
+
+    The shift is in pixels of the 128x128 crop, not of the original tile. A crop of a
+    typical building is magnified about 2x, so 4 crop pixels are about 2 tile pixels.
+    """
+    dx, dy = torch.randint(-max_shift, max_shift + 1, (2,)).tolist()
+    if dx == 0 and dy == 0:
+        return img
+    h, w = img.shape[-2:]
+    padded = torch.nn.functional.pad(img.unsqueeze(0), (max_shift,) * 4, mode="replicate")[0]
+    top, left = max_shift + dy, max_shift + dx
+    return padded[:, top:top + h, left:left + w]
 
 
 class CropDataset(Dataset):
@@ -96,7 +140,8 @@ class CropDataset(Dataset):
 
     cache_dir   folder written by scripts/build_crops.py
     part        "train", "val-tiles" or "val" ("test" needs final=True)
-    augment     True for training only. Validation must see the same images every epoch,
+    augment     False, "base" (True means the same) or "strong"; see ``augment_pair``.
+                For training only. Validation must see the same images every epoch,
                 otherwise the score would wobble for reasons unrelated to the model.
     final       must be True to load the test part; see src/split.py for why.
     """
@@ -105,7 +150,11 @@ class CropDataset(Dataset):
         require_final(part, final)          # raises TestSplitError for "test" by default
         self.cache_dir = Path(cache_dir)
         self.part = part
-        self.augment = augment
+        self.augment = "base" if augment is True else augment
+        if self.augment in (None, "none"):
+            self.augment = False
+        if self.augment not in (False, "base", "strong"):
+            raise ValueError(f"Unknown augmentation {augment!r}; use False, 'base' or 'strong'")
         self.index = read_index(cache_dir, part)
         self.labels = self.index["label"].to_numpy(dtype=np.int64)
         for name in ("pre", "post"):
@@ -129,15 +178,26 @@ class CropDataset(Dataset):
     def __getitem__(self, i):
         if self._pre is None:
             self._open()
-        # np.array(...) copies the crop out of the read-only file; then HWC uint8 0..255
-        # becomes CHW float 0..1.
-        pre = torch.from_numpy(np.array(self._pre[i])).permute(2, 0, 1).float() / 255.0
-        post = torch.from_numpy(np.array(self._post[i])).permute(2, 0, 1).float() / 255.0
+        pre, post = self._to_tensor(self._pre[i]), self._to_tensor(self._post[i])
         if self.augment:
-            pre, post = augment_pair(pre, post)
-        pre = (pre - IMAGENET_MEAN) / IMAGENET_STD
-        post = (post - IMAGENET_MEAN) / IMAGENET_STD
+            pre, post = augment_pair(pre, post, self.augment)
+        # A flipped or rotated tensor is a "view" that reads the same memory in a
+        # different order; .contiguous() rewrites it in plain order (see _to_tensor).
+        pre = (pre.contiguous() - IMAGENET_MEAN) / IMAGENET_STD
+        post = (post.contiguous() - IMAGENET_MEAN) / IMAGENET_STD
         return pre, post, int(self.labels[i])
+
+    @staticmethod
+    def _to_tensor(crop):
+        """HWC uint8 (0..255) from the cache -> CHW float (0..1).
+
+        np.array(...) copies the crop out of the read-only file. ``.contiguous()``
+        matters for speed: ``permute`` does not move any data, it only changes the order
+        in which the axes are read, and arithmetic on such a tensor is several times
+        slower. Making it contiguous first cut the time per item from about 2 ms to a
+        fraction of that, which is what lets two loader workers keep up with the GPU.
+        """
+        return torch.from_numpy(np.array(crop)).permute(2, 0, 1).contiguous().float().div_(255.0)
 
 
 def unnormalize(img):

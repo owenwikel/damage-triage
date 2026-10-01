@@ -34,6 +34,7 @@ c) Deep ensemble
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from src.calibrate import fit_temperature
 from src.dataset import CropDataset
 from src.metrics import softmax
 from src.model import build_model
@@ -62,11 +64,15 @@ def enable_mc_dropout(model):
 
 
 @torch.no_grad()
-def mc_dropout_probs(model, loader, device, passes=20, amp=True):
+def mc_dropout_probs(model, loader, device, passes=20, amp=True, temperature=1.0):
     """Class probabilities from ``passes`` stochastic forward passes: array [passes, N, 4].
 
     Each batch is loaded once and pushed through the model ``passes`` times, which is
     much cheaper than iterating over the dataset 20 times.
+
+    ``temperature`` divides the logits of every pass before the softmax (see
+    src/calibrate.py), so that MC dropout starts from the same calibrated probabilities
+    as the plain "max prob" method and the two can be compared fairly.
     """
     enable_mc_dropout(model)
     out = []
@@ -76,7 +82,7 @@ def mc_dropout_probs(model, loader, device, passes=20, amp=True):
         for _ in range(passes):
             with torch.autocast("cuda", enabled=amp and device.type == "cuda"):
                 logits = model(pre, post)
-            batch.append(torch.softmax(logits.float(), dim=1).cpu())
+            batch.append(torch.softmax(logits.float() / temperature, dim=1).cpu())
         out.append(torch.stack(batch))            # [passes, B, 4]
     model.eval()
     return torch.cat(out, dim=1).numpy()
@@ -106,7 +112,8 @@ def ensemble_probs(list_of_logits):
     return np.mean([softmax(np.asarray(l, dtype=np.float64)) for l in list_of_logits], axis=0)
 
 
-def method_scores(logits, labels, temperature=None, mc=None, ensemble_logits=None):
+def method_scores(logits, labels, temperature=None, mc=None, ensemble_logits=None,
+                  ensemble_temperature=None):
     """Predictions and confidence for every method we can build from what is given.
 
     Returns {method name: {"pred": [N], "confidence": [N], "probs": [N, 4]}}.
@@ -130,7 +137,45 @@ def method_scores(logits, labels, temperature=None, mc=None, ensemble_logits=Non
         p = ensemble_probs(ensemble_logits)
         out[f"ensemble of {len(ensemble_logits)}"] = {"probs": p, "pred": p.argmax(1),
                                                       "confidence": p.max(1)}
+        if ensemble_temperature is not None:
+            # An average of several models is usually LESS confident than each member
+            # (they disagree a little), so the ensemble needs its own temperature. Its
+            # "logits" are the log of the averaged probabilities.
+            p = softmax(np.log(np.clip(p, 1e-12, None)) / ensemble_temperature)
+            out[f"ensemble of {len(ensemble_logits)} (temp. scaled)"] = {
+                "probs": p, "pred": p.argmax(1), "confidence": p.max(1)}
     return out
+
+
+def collect_methods(run_dir, seed_dirs=(), parts=("val-tiles", "val")):
+    """Build every available method for one base run from the files in runs/.
+
+    run_dir     the seed-0 run: its logits give the max-prob methods, and its
+                mc_dropout_<part>.npz files (if present) give MC dropout
+    seed_dirs   all ensemble members' run folders, INCLUDING run_dir; fewer than two
+                finished members means no ensemble
+
+    Returns ({part: method_scores(...)}, info) where info holds the temperatures.
+    Both temperatures are fitted on val-tiles only.
+    """
+    run_dir = Path(run_dir)
+    members = [Path(d) for d in seed_dirs if (Path(d) / "preds_val.npz").exists()]
+    preds = {p: np.load(run_dir / f"preds_{p}.npz") for p in parts}
+    temperature = fit_temperature(preds["val-tiles"]["logits"], preds["val-tiles"]["labels"])
+    member_logits = {p: [np.load(d / f"preds_{p}.npz")["logits"] for d in members] for p in parts}
+    ens_t = None
+    if len(members) > 1:
+        ens = ensemble_probs(member_logits["val-tiles"])
+        ens_t = fit_temperature(np.log(np.clip(ens, 1e-12, None)), preds["val-tiles"]["labels"])
+    methods = {}
+    for p in parts:
+        mc_path = run_dir / f"mc_dropout_{p}.npz"
+        methods[p] = method_scores(
+            preds[p]["logits"], preds[p]["labels"], temperature,
+            mc=dict(np.load(mc_path)) if mc_path.exists() else None,
+            ensemble_logits=member_logits[p], ensemble_temperature=ens_t)
+    return methods, {"temperature": temperature, "ensemble_temperature": ens_t,
+                     "members": [d.name for d in members]}
 
 
 def main():
@@ -140,7 +185,8 @@ def main():
     ap.add_argument("--passes", type=int, default=20)
     ap.add_argument("--parts", nargs="+", default=["val-tiles", "val"])
     ap.add_argument("--batch-size", type=int, default=512)
-    ap.add_argument("--num-workers", type=int, default=6)
+    ap.add_argument("--num-workers", type=int, default=0,
+                    help="0 = load in the main process: slower, but no extra memory")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -151,14 +197,22 @@ def main():
     model.load_state_dict(state["model"])
     torch.manual_seed(args.seed)          # dropout masks are random: fix them
     torch.cuda.manual_seed_all(args.seed)
+    # The same temperature as the plain max-prob method: fitted on this model's ordinary
+    # (dropout off) val-tiles predictions.
+    fit = np.load(args.run / "preds_val-tiles.npz")
+    temperature = fit_temperature(fit["logits"], fit["labels"])
+    (args.run / "mc_dropout.json").write_text(json.dumps(
+        {"passes": args.passes, "temperature": temperature, "seed": args.seed}), encoding="utf-8")
+    print(f"temperature {temperature:.3f} (from val-tiles), {args.passes} passes", flush=True)
     for part in args.parts:
         # CropDataset refuses part="test" (src/split.py); there is no --final here on purpose.
         loader = DataLoader(CropDataset(cfg["cache_dir"], part), batch_size=args.batch_size,
                             num_workers=args.num_workers, pin_memory=True)
-        summary = mc_dropout_summary(mc_dropout_probs(model, loader, device, args.passes))
+        summary = mc_dropout_summary(mc_dropout_probs(model, loader, device, args.passes,
+                                                      temperature=temperature))
         np.savez_compressed(args.run / f"mc_dropout_{part}.npz", **summary)
         print(f"{part}: {len(summary['entropy']):,} buildings x {args.passes} passes -> "
-              f"{args.run / f'mc_dropout_{part}.npz'}")
+              f"{args.run / f'mc_dropout_{part}.npz'}", flush=True)
 
 
 if __name__ == "__main__":

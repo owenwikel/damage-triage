@@ -14,6 +14,8 @@ Sections
     5. confidence vs distance to the nearest building with a different label
        (hypothesis 2 in docs/observations.md: uncertainty is highest at damage boundaries)
     6. gallery: most confident mistakes, least confident correct predictions
+    7. sections 4 and 5 again for every uncertainty method (MC dropout, ensemble), when
+       the base run has them
 """
 
 import argparse
@@ -32,6 +34,7 @@ from src.colors import DAMAGE_COLORS, INK, INK_SECONDARY, SURFACE  # noqa: E402
 from src.dataset import CLASS_NAMES, read_index  # noqa: E402
 from src.metrics import summarize  # noqa: E402
 from src.reporting import df_to_markdown  # noqa: E402
+from src.uncertainty import collect_methods  # noqa: E402
 
 PARTS = ["val-tiles", "val"]
 SHORT = ["no-dmg", "minor", "major", "destr."]
@@ -169,6 +172,8 @@ def main():
     ap.add_argument("--out", type=Path, default=Path("docs/error_analysis.md"))
     ap.add_argument("--fig-dir", type=Path, default=Path("docs/figures"))
     ap.add_argument("--gallery", type=int, default=20)
+    ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2],
+                    help="ensemble members: sibling runs <name>_s<seed> of --run")
     args = ap.parse_args()
     args.fig_dir.mkdir(parents=True, exist_ok=True)
     fig_rel = args.fig_dir.relative_to(args.out.parent).as_posix()
@@ -290,6 +295,48 @@ def main():
           + ", ".join(f"{SHORT[k]} ({v})" for k, v in unsure["label"].value_counts().items()) + ".\n",
           "Confident mistakes are the ones to look at by eye: each is either a model "
           "failure worth understanding or a label worth questioning.\n"]
+
+    # 7. the same questions for every uncertainty method
+    stem = args.run.name.rsplit("_s", 1)[0]
+    methods, info = collect_methods(args.run, [args.run.parent / f"{stem}_s{s}" for s in args.seeds])
+    rows = []
+    for part in PARTS:
+        sel = (df["part"] == part).to_numpy()
+        sub = df[sel]
+        d, c, e = dist[sel], cand[sel], eligible[sel]
+        for name, m in methods[part].items():
+            conf = np.asarray(m["confidence"], dtype=float)
+            right = m["pred"] == sub["label"].to_numpy()
+            fin = np.isfinite(d)
+            rho = float(pd.Series(d[fin]).rank().corr(pd.Series(conf[fin]).rank())) if fin.sum() > 2 else np.nan
+            # AUROC of "is this prediction right?": the chance that a randomly chosen
+            # correct prediction gets a higher confidence than a randomly chosen wrong
+            # one. 0.5 = the confidence says nothing; 1.0 = it separates them perfectly.
+            ranks = pd.Series(conf).rank().to_numpy()
+            n_pos, n_neg = right.sum(), (~right).sum()
+            auroc = ((ranks[right].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+                     if n_pos and n_neg else np.nan)
+            # share of candidates among the least-confident 10% vs their share overall
+            low = conf <= np.quantile(conf[e], 0.10) if e.any() else np.zeros_like(c)
+            rows.append({"split": part, "method": name, "accuracy": right.mean(),
+                         "AUROC: confidence separates right from wrong": auroc,
+                         "rank corr.: distance to boundary vs confidence": rho,
+                         "noise candidates: share in least-confident 10%":
+                             (c & low & e).sum() / max(c.sum(), 1)})
+    L += ["## 7. The same questions for every uncertainty method\n",
+          "Sections 4 and 5 used the temperature-scaled top probability of the seed-0 "
+          "model. Here every available method is asked the same things"
+          + (f" (ensemble members: {', '.join(info['members'])})" if len(info["members"]) > 1 else "")
+          + ":\n",
+          "- **AUROC**: probability that a correct prediction gets a higher confidence than "
+          "a wrong one (0.5 = useless, 1 = perfect);",
+          "- **rank correlation** between distance to the nearest differently-labelled "
+          "building and confidence (section 5; positive = less sure near boundaries);",
+          "- **noise candidates in the least-confident 10%**: if confidence were unrelated "
+          "to the label-noise candidates of section 4, this would be 10%.\n",
+          df_to_markdown(pd.DataFrame(rows), float_fmt="{:.3f}", index=False) + "\n",
+          "For entropy the 'confidence' is minus the predictive entropy, so only its "
+          "ranking is meaningful.\n"]
 
     args.out.write_text("\n".join(L), encoding="utf-8")
     print(f"Wrote {args.out} and {gallery_dir}")

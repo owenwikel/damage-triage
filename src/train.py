@@ -14,13 +14,14 @@ What a training run does, in order
     2. build the datasets and loaders (train with augmentation; val-tiles and val without)
     3. build the model, the loss, the optimiser and the learning-rate schedule
     4. for each epoch: one pass over the training set, then evaluate on val-tiles and val
-    5. keep the weights of the best epoch (by val-tiles macro-F1); stop early if there is
-       no improvement for ``patience`` epochs
+    5. keep the weights of the best epoch (by the mean of val-tiles and val macro-F1);
+       stop early if there is no improvement for ``patience`` epochs
     6. save predictions of the best model on val-tiles and val, for the later analysis
 
 Outputs in runs/<run_name>/ (not in git):
     config.json     the settings
-    log.jsonl       one line of metrics per epoch, written as training goes
+    log.jsonl       one line per epoch, written as training goes: metrics, plus RAM and
+                    GPU memory at the end of the epoch
     best.pt         weights of the best epoch
     metrics.json    summary: best epoch, metrics there, time per epoch, GPU memory
     preds_<part>.npz   logits and labels of the best model on val-tiles and val
@@ -37,6 +38,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import numpy as np
+import psutil
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
@@ -55,6 +57,8 @@ class Config:
     runs_dir: str = "runs"
     epochs: int = 10
     patience: int = 3                # early stopping: epochs without improvement allowed
+    select_on: str = "mean"          # which score picks the best epoch (see selection_score)
+    augment: str = "base"            # "base" or "strong" (src/dataset.py, augment_pair)
     batch_size: int = 0              # 0 = probe the GPU for the largest batch that fits
     max_batch_size: int = 512        # ...but never above this (see find_batch_size)
     eval_batch_size: int = 512       # evaluation stores no gradients, so memory is not the limit
@@ -64,7 +68,7 @@ class Config:
     dropout: float = 0.3
     pretrained: bool = True
     amp: bool = True                 # mixed precision (see train_one_epoch)
-    num_workers: int = 6             # background processes that prepare training batches
+    num_workers: int = 2             # background processes that prepare training batches
     eval_num_workers: int = 0        # 0 = evaluation batches are prepared in the main process
     overfit: int = 0                 # N > 0: sanity check, train on N crops only
 
@@ -259,6 +263,65 @@ def evaluate(model, loader, criterion, device, amp=True):
 
 
 # --------------------------------------------------------------------------------------
+# Which epoch is "best", and how much memory are we using
+# --------------------------------------------------------------------------------------
+
+def selection_score(row, select_on):
+    """The number that decides which epoch's weights are kept (higher is better).
+
+    "mean" (default)  average of the macro-F1 on val-tiles and on val
+    "val-tiles"       macro-F1 on val-tiles only (the rule of the very first run)
+    "val"             macro-F1 on val only
+
+    Why the mean? The first run selected on val-tiles alone. val-tiles comes from the
+    training disasters, so it rewards fitting those ever more closely: it kept improving
+    until epoch 8 while val, the unseen disasters, was flat or worse after epoch 4.
+    Selecting on val alone would be noisy (two flood disasters, few minor-damage and
+    destroyed buildings). The mean asks for an epoch that is good on both.
+
+    The price, and it is a real one: val now influences which weights we keep, so val is
+    no longer an untouched estimate of performance on a new disaster. It will read a
+    little optimistic. The only untouched data left is the test set.
+    """
+    if select_on == "mean":
+        return (row["val-tiles"]["macro_f1"] + row["val"]["macro_f1"]) / 2
+    return row[select_on]["macro_f1"]
+
+
+def memory_snapshot(device):
+    """RAM and GPU memory right now, for the per-epoch log.
+
+    An earlier run nearly exhausted the machine's memory without anything in its own log
+    showing it (BLOCKERS.md). These numbers make that visible after the fact:
+      ram_used_gb / ram_available_gb   the whole machine, all programs
+      run_private_gb                   memory owned by this run: the main process plus
+                                       its DataLoader workers
+      gpu_peak_*_gb                    highest GPU memory since the run started;
+                                       "allocated" is what tensors occupy, "reserved"
+                                       is what PyTorch has claimed from the card
+    """
+    vm = psutil.virtual_memory()
+    me = psutil.Process()
+    private, workers = 0, 0
+    for proc in [me] + me.children(recursive=True):
+        try:
+            info = proc.memory_info()
+            # "private" (Windows) excludes memory shared with other processes, such as
+            # the memory-mapped crop files; fall back to rss elsewhere.
+            private += getattr(info, "private", info.rss)
+            workers += proc.pid != me.pid
+        except psutil.Error:      # a worker that exited between listing and asking
+            pass
+    snap = {"ram_used_gb": round(vm.used / 2**30, 2),
+            "ram_available_gb": round(vm.available / 2**30, 2),
+            "run_private_gb": round(private / 2**30, 2), "loader_workers": workers}
+    if device.type == "cuda":
+        snap["gpu_peak_allocated_gb"] = round(torch.cuda.max_memory_allocated(device) / 2**30, 2)
+        snap["gpu_peak_reserved_gb"] = round(torch.cuda.max_memory_reserved(device) / 2**30, 2)
+    return snap
+
+
+# --------------------------------------------------------------------------------------
 # The run
 # --------------------------------------------------------------------------------------
 
@@ -275,9 +338,11 @@ def make_loader(dataset, batch_size, shuffle, cfg, seed=None):
     #     128x128 float images is 200 MB.
     # The first full run used 8 workers for training AND for each of the two evaluation
     # loaders, with evaluation batches of 1024: 24 processes and about 59 of the
-    # machine's 62 GB (BLOCKERS.md). Evaluation needs no augmentation and runs once per
-    # epoch, so by default it now loads in the main process (0 workers): a few seconds
-    # slower per epoch, a fraction of the memory.
+    # machine's 62 GB (BLOCKERS.md). Now: 2 training workers (enough once the per-item
+    # work was made cheap, see CropDataset._to_tensor), and evaluation loads in the main
+    # process (0 workers), since it needs no augmentation and runs once per epoch.
+    # Nothing here ever holds a whole split in memory: the crops stay in memory-mapped
+    # files and only the batches in flight are loaded.
     workers = cfg.num_workers if shuffle else min(cfg.num_workers, cfg.eval_num_workers)
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, generator=generator,
@@ -292,14 +357,15 @@ def make_loader(dataset, batch_size, shuffle, cfg, seed=None):
 
 def run(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cfg.run_name = cfg.run_name or f"{cfg.arch}_s{cfg.seed}"
+    cfg.run_name = cfg.run_name or (f"{cfg.arch}{'_aug' if cfg.augment == 'strong' else ''}"
+                                    f"_s{cfg.seed}")
     out_dir = Path(cfg.runs_dir) / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg.amp = cfg.amp and device.type == "cuda"    # mixed precision is a GPU feature
     seed_everything(cfg.seed)
 
     # ---- data ----
-    train_set = CropDataset(cfg.cache_dir, "train", augment=not cfg.overfit)
+    train_set = CropDataset(cfg.cache_dir, "train", augment=False if cfg.overfit else cfg.augment)
     train_labels = train_set.labels
     eval_sets = {}
     if cfg.overfit:
@@ -313,7 +379,7 @@ def run(cfg):
         eval_sets = {"overfit-subset": train_set}
     else:
         eval_sets = {p: CropDataset(cfg.cache_dir, p) for p in ("val-tiles", "val")}
-    select_on = "overfit-subset" if cfg.overfit else "val-tiles"
+    select_on = "overfit-subset" if cfg.overfit else cfg.select_on
 
     # ---- model ----
     model = build_model(cfg.arch, cfg.pretrained, cfg.dropout).to(device)
@@ -372,6 +438,9 @@ def run(cfg):
         for part, loader in eval_loaders.items():
             row[part], _, _ = evaluate(model, loader, criterion, device, cfg.amp)
         row["epoch_seconds"] = round(time.time() - t0, 1)
+        row["memory"] = memory_snapshot(device)
+        if not cfg.overfit:
+            row["selection_score"] = selection_score(row, select_on)
         history.append(row)
         log.write(json.dumps(row) + "\n")
         log.flush()
@@ -382,15 +451,17 @@ def run(cfg):
             recalls = " ".join("  - " if r is None else f"{r:.2f}" for r in m["recall"])
             line += (f" | {part}: loss {m['loss']:.3f} acc {m['accuracy']:.3f} "
                      f"F1 {m['macro_f1']:.3f} recall [{recalls}]")
-        print(line + f" | {row['epoch_seconds']:.0f}s", flush=True)
+        mem = row["memory"]
+        print(line + f" | {row['epoch_seconds']:.0f}s | RAM used {mem['ram_used_gb']:.0f} GB "
+              f"(this run {mem['run_private_gb']:.1f}), free {mem['ram_available_gb']:.0f} GB, "
+              f"GPU peak {mem.get('gpu_peak_reserved_gb', 0):.1f} GB", flush=True)
 
         # Early stopping. The model keeps improving on the training set for as long as we
-        # let it; what we care about is held-out data. So after every epoch we check
-        # val-tiles macro-F1, keep a copy of the weights whenever it is the best so far,
-        # and stop when it has not improved for ``patience`` epochs.
-        # (Why val-tiles and not val? docs/split_decision.md: val is floods only and has
-        # too few minor-damage and destroyed buildings to steer by.)
-        score = row[select_on]["accuracy" if cfg.overfit else "macro_f1"]
+        # let it; what we care about is held-out data. So after every epoch we compute a
+        # selection score (see selection_score: by default the mean of the val-tiles and
+        # val macro-F1), keep a copy of the weights whenever it is the best so far, and
+        # stop when it has not improved for ``patience`` epochs.
+        score = row[select_on]["accuracy"] if cfg.overfit else row["selection_score"]
         if score > best:
             best, best_epoch, since_best = score, epoch, 0
             torch.save({"model": model.state_dict(), "config": asdict(cfg), "epoch": epoch},
@@ -422,6 +493,11 @@ def run(cfg):
                                   if device.type == "cuda" else None),
         "gpu_peak_reserved_gb": (torch.cuda.max_memory_reserved(device) / 2**30
                                  if device.type == "cuda" else None),
+        "ram_peak_used_gb": max(h["memory"]["ram_used_gb"] for h in history),
+        "ram_min_available_gb": min(h["memory"]["ram_available_gb"] for h in history),
+        "run_peak_private_gb": max(h["memory"]["run_private_gb"] for h in history),
+        "num_workers": cfg.num_workers, "augment": cfg.augment,
+        "best_selection_score": None if cfg.overfit else best,
         "class_weights": weights.cpu().tolist(), "class_names": CLASS_NAMES,
         "best": final, "history": history,
     }
