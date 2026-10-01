@@ -217,7 +217,8 @@ that maps `(pre, post)` to four logits. Both use one pretrained ResNet-18.
   learn to subtract), or only the difference (loses "what kind of building is this").
 - *Misalignment* (`docs/data_quality.md` section 6: unmeasured, plausibly a few pixels) is
   the main argument for late fusion; local change detection is the main argument for
-  early fusion. Which wins is empirical: see `docs/results.md` section 3.
+  early fusion. Which wins is empirical: see `docs/results.md` section 3 (at the time of
+  writing only the siamese model has been trained; see `BLOCKERS.md`).
 
 **Interview questions.**
 

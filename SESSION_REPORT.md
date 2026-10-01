@@ -1,96 +1,123 @@
-# Session report: unattended data-quality session (2026-09-30)
+# Session report: first modelling session (2026-10-01, 00:15-01:15)
 
-No model, dataset class, training loop or PyTorch training code was written. No `.tar`
-file or data folder was modified. No `BLOCKERS.md` was needed: nothing blocked a task.
-Details of each finding are in the linked docs; this page is the summary.
+**Short version.** The pipeline is built end to end and one model (siamese ResNet-18) is
+trained and analysed on validation data. The session stopped after about 1 hour of the
+planned 5: the machine ran low on memory during the first training run, the queued
+training jobs were stopped, and I was told not to restart them without being asked. So
+the stack model, the ensemble and MC dropout are **not done**. `BLOCKERS.md` has the
+details; `scripts\finish_runs.ps1` runs everything that is missing.
 
-## What was done
+**The test set was never loaded, evaluated or looked at.** Every loader goes through
+`src/split.py`, which raises unless `--final` / `final=True` is given, and the crop cache
+contains no test crops. I also did not run the optional test that re-derives the split
+from the raw data (`XBD_DATA_DIR`), because it reads the coordinates in test tiles'
+label files.
 
-| task | output | commit |
+## What ran
+
+| step | status | output | commit |
+|---|---|---|---|
+| 0. move split_decision.md | done | `docs/split_decision.md`; `docs/docs/` removed | `7ae8125` |
+| 1. crop cache | done | `scripts/build_crops.py`, `src/crops.py`, `src/split.py` (guard). 168,477 buildings (train 134,660, val-tiles 14,718, val 19,099), **15.45 GB** in `C:\Users\wikel\dev\xbd-data\crops\`, built in 82 s | `45129ad` |
+| 2. dataset | done | `src/dataset.py`, tests on a synthetic cache | `1cb4668` |
+| 3. models | done | `src/model.py` (siamese, stack), `src/metrics.py` | `e0fc09c` |
+| 4. training loop | done | `src/train.py`, `configs/`. Sanity check: 256 crops overfitted to **100%** in 4 epochs | `56a4f63` |
+| 5. baselines | done | `docs/results.md` section 1 | `d83850f` |
+| 6. siamese and stack | **half**: siamese trained; stack not | `docs/results.md` section 3 | `d83850f` |
+| 7. calibration | done (on siamese) | `src/calibrate.py`, `docs/results.md` section 4 | `e5acc4f`, `d83850f` |
+| 8. uncertainty methods | **a only**: max softmax. MC dropout and ensemble code is written and tested, not run | `src/uncertainty.py`, `docs/results.md` section 5 | `e5acc4f`, `d83850f` |
+| 9. triage | done for the max-softmax method | `src/triage.py`, `docs/results.md` section 6 | `e5acc4f`, `d83850f` |
+| 10. error analysis | done | `docs/error_analysis.md`, gallery in `runs/siamese_s0/gallery/` | `fa2202c` |
+| 11. demo figures | done | `outputs/demo/` (6 tiles), `docs/demo.md` | `1d7946f` |
+| 12. walkthrough, README, this report | done | `docs/WALKTHROUGH.md`, `README.md` | `c355c93`, final commit |
+
+Tests: **112 pass, 1 skipped** (the real-data test mentioned above). CI now installs
+CPU PyTorch so the model and dataset tests run there too.
+
+## Results (validation only)
+
+`siamese_s0`: 10 epochs, best epoch 8 by val-tiles macro-F1, batch 512, about 150 s of
+training per epoch (196 s with evaluation), GPU peak 5.0 GB allocated / 8.0 GB reserved.
+
+| | accuracy | macro-F1 | recall no-dmg / minor / major / destroyed |
+|---|---|---|---|
+| val-tiles, siamese | 0.879 | 0.708 | 0.93 / 0.50 / 0.74 / 0.74 |
+| val-tiles, majority baseline | 0.809 | 0.224 | 1 / 0 / 0 / 0 |
+| val-tiles, weighted random | 0.615 | 0.248 | 0.74 / 0.09 / 0.09 / 0.08 |
+| val, siamese | **0.451** | **0.243** | 0.47 / 0.28 / 0.35 / 0.21 |
+| val, majority baseline | 0.878 | 0.234 | 1 / 0 / 0 / 0 |
+| val, weighted random | 0.660 | 0.236 | 0.74 / 0.09 / 0.09 / 0.08 |
+
+| | val-tiles | val |
 |---|---|---|
-| 1. README | status, data source (xBD Challenge set, stored outside the repo), links to docs | `1b6d442` |
-| 2. Data-quality audit | `docs/data_quality.md` sections 1-6, `scripts/audit_data.py`, `src/alignment.py` | `d686ac3` |
-| 3. Split candidates | `docs/split_candidates.md`, `scripts/split_candidates.py` | `3a5aaad` |
-| 4. Crop sizes | `docs/data_quality.md` section 7, `scripts/crop_sizes.py`, `outputs/crops_example.png` | `a87e89c` |
-| 5. CI | `.github/workflows/tests.yml`, `requirements-ci.txt`, synthetic fixture + smoke tests | `5cf5249` |
-| 6. Model primer | `docs/model_primer.md` (teaching only, toy snippets, 8 exercises) | `0deeb70` |
-| 6b. Disaster table | `docs/disasters.md`, `scripts/disaster_table.py` | `c529e7c`, `ab56b40` |
-| 6c. Label-noise candidates | `docs/label_noise.md`, `scripts/label_noise.py`, gallery in `outputs/label_noise/` | `6dfd10d` |
+| ECE before / after temperature scaling (T = 1.60) | 0.045 / 0.011 | 0.272 / 0.170 |
+| accuracy at 100 / 80 / 50% coverage | 0.879 / 0.965 / 0.994 | 0.451 / 0.496 / 0.586 |
+| area under the risk-coverage curve | 0.020 | 0.371 |
+| damaged buildings reached visiting 20%, "most likely damaged first" | 80.7% | 29.8% |
+| same, visiting at random | 20% | 20% |
 
-`git pull` at the start: already up to date (no README edits on GitHub to merge).
+## Surprises
 
-Tests: **41 pass locally**. They also pass in a fresh venv built only from
-`requirements-ci.txt` (no PyTorch), which is what CI installs. Every script now has an
-end-to-end smoke test on a synthetic one-tile dataset (`tests/conftest.py`). Those smoke
-tests caught three edge-case bugs, all fixed:
-- the val-tiles split could empty a small disaster out of train;
-- crop examples crashed when no building matched a size;
-- label noise crashed when there were no candidates.
+1. **The model fails on unseen disasters.** On val it is less accurate than always
+   answering "no-damage", and its macro-F1 is at guessing level. midwest-flooding is the
+   worst: only 31% of undamaged buildings are called undamaged. The crops were checked by
+   eye and are correct; val imagery is visibly darker and greener than train, and the
+   post-flood images are brown water. This is the main result of the session and the
+   first thing to work on.
+2. **Even val-tiles is uneven.** 0.879 overall hides mexico-earthquake at 0.997 (nearly
+   all no-damage) next to hurricane-matthew at 0.537 (no-damage recall 0.10) and
+   hurricane-harvey at 0.655.
+3. **Your boundary hypothesis holds on val-tiles, not on val.** Mean confidence rises
+   from 0.67 for buildings within 25 px of a differently-labelled building to 0.89 beyond
+   200 px (rank correlation +0.50). On val there is no relation (+0.02): there the model
+   is unsure everywhere.
+4. **Label-noise candidates are lower-confidence** on val-tiles (mean 0.68 against 0.88),
+   and the model agrees with their labels only 43% of the time (89% elsewhere).
+5. **Some of the 20 most confident mistakes look like label problems.** Three are labelled
+   no-damage where the building is simply gone in the post image (palu-tsunami tile 170).
+   Most of the rest are damaged buildings called no-damage that look intact from above.
+   Worth ten minutes with `runs/siamese_s0/gallery/confident_mistakes.png`.
+6. **Size and tile edge matter less than expected.** No clear trend with size on
+   val-tiles; edge-cut buildings are slightly worse (0.855 against 0.881 accuracy).
+7. **Memory, not the GPU, was the bottleneck.** 24 data-loader processes used about 59 of
+   62 GB. Throughput was the same at batch 128, 256 and 512, so a big batch bought
+   nothing in speed.
 
-None of the three changed any real-data result.
+## Decisions waiting for you
 
-Everything the scripts generate is reproducible: each doc says which script made it, and
-the scripts take `--data-dir`.
+1. **Run the rest?** `powershell -ExecutionPolicy Bypass -File scripts\finish_runs.ps1`
+   trains stack, then seeds 1 and 2 of the better architecture, runs MC dropout and
+   rebuilds the documents: roughly 1.5 hours. The script has not been executed, and the
+   lighter loader settings have not been through a full run; watch memory at the start.
+2. **What to do about the val gap** before spending GPU time on ensembles of a model that
+   does not transfer. Options, cheapest first: stronger colour and contrast augmentation;
+   per-image normalisation; a lower learning rate for the backbone; larger context
+   around buildings for floods. My recommendation: try the augmentation first, and judge
+   it on val, not val-tiles.
+3. **Early stopping on val-tiles picks epoch 8, but val is flat or worse after epoch 4.**
+   val-tiles rewards fitting the training disasters. Do you want to keep selecting on
+   val-tiles (as decided in `docs/split_decision.md`), or select on val and accept that
+   val then stops being a clean estimate?
+4. **Batch size.** You asked for the largest batch that fits 8 GB. The probe found 512 at
+   4.2 GB; 1024 does not fit. I also cap at 512 by default, because a larger batch means
+   too few update steps in 10 epochs. Say if you want the cap removed.
+5. **Stack model's first layer.** You asked for the pretrained weights copied into both
+   halves. I copy them and multiply by 0.5, so the layer's output keeps its original
+   scale. Remove the 0.5 in `_six_channel_conv` if you want the plain copy.
+6. **`outputs/demo/` is now tracked in git** (the rest of `outputs/` is still ignored), so
+   the README and `docs/demo.md` can show the figures on GitHub. Other figures are in
+   `docs/figures/`. 1.8 MB in total.
+7. **Demo tiles.** val has only two disasters, so the six tiles are those two plus four
+   val-tiles tiles (harvey, matthew, palu, socal). They were picked from the labels, not
+   by model performance; the Florence tile is 27% correct and is shown as it is.
 
-## Surprising things in the data
+## Problems hit
 
-1. **Pre/post misalignment is real, but my automated measurement of it failed.** Phase
-   correlation (whole-tile, per-patch, on intensity and gradients) reports shifts of a
-   few pixels, but a null control on *unrelated* image pairs reports nearly the same
-   sizes. So the numbers are mostly noise floor (`docs/data_quality.md` section 6). By
-   eye, though, the post image is visibly off its polygon for some buildings: about 10 px
-   for a Palu example, a few px for Michael and Florence (section 7 figure). Polygons
-   match the *pre* image.
-2. **The post image was usually taken from a steeper angle and at coarser resolution.**
-   Post off-nadir is larger than pre for 9 of 10 disasters (Harvey 43° vs 25°), and
-   `pan_resolution` is coarser for 7 of 10 (Mexico 0.66 vs 0.34 m). That fits both the
-   misalignment (parallax) and the visibly blurrier Mexico post images
-   (`docs/disasters.md`).
-3. **Pre and post label files agree almost exactly.** Same buildings in every tile. For
-   92% of buildings the outline is identical; almost all the rest differ by about 1 px,
-   with no consistent direction. So the post polygon wasn't redrawn to follow the post
-   image, and the labels don't correct item 1.
-4. **Guatemala is 19.8% un-classified**, against 0.2-5.5% for every other disaster.
-5. **Hurricane Michael has the most label-noise candidates by far:** 9.8% of its buildings
-   disagree with all 5 nearest neighbours, against 0.2-1.6% for most disasters (Matthew
-   5.8%). They are mostly damaged buildings surrounded by no-damage ones: 1,091 labelled
-   minor and 563 labelled major, out of 2,753 (`outputs/label_noise/candidates.csv`).
-6. **No tile appears in both the train and test folders, and no building appears whole in
-   two tiles**, so pooling the folders for the split is safe. But 90% of tiles have a
-   building within 50 px of the border, so neighbouring tiles share streets.
-7. **One invalid polygon** (hurricane-michael_00000172, self-intersecting). `buffer(0)`
-   repairs it to a valid polygon of the same area.
-8. **Building sizes vary 2x between disasters**: median bbox side 23 px (Matthew,
-   Guatemala) to 49 px (Harvey). With 16 px of context, a 64 px crop fits only 17% of
-   Harvey's buildings but 76% of Matthew's.
+- Batch-size probe stalled the first launch (it tried batches larger than the GPU;
+  fixed, about 8 minutes lost).
+- Memory pressure stopped the queue (see above and `BLOCKERS.md`).
+- GPU reserved memory peaked at the full 8.0 GB during the run (5.0 GB actually in use;
+  the rest is cuDNN trying out convolution algorithms). It did not crash, but there is no
+  headroom at batch 512 for the siamese model.
 
-## Open questions for you
-
-1. **Label-noise gallery:** could you mark the 30 examples in `docs/label_noise.md`
-   (the last column) after looking at `outputs/label_noise/gallery_0*.png`? That gives a
-   first estimate of how many candidates are real mistakes, especially for Michael.
-2. **Misalignment:** is it worth measuring properly? Options are hand-marking matching
-   points on ~10 tiles, or feature matching with OpenCV (not installed). Or is "a few
-   pixels, sometimes ~10" enough to design around (padding, siamese features)?
-3. **torchvision is not installed** in the venv (only torch 2.6.0+cu124). Pretrained
-   backbones need it; the matching build is torchvision 0.21.0 from the cu124 index. I
-   didn't install it because the environment setup is yours (see `SETUP_NOTES.md`).
-4. **CI:** the workflow runs on this push. I couldn't check the result from here (no `gh`
-   CLI); please look at the repo's Actions tab. It's untested on Linux until then.
-
-## Decisions waiting on you
-
-1. **Split:** choose among P1, P1 + val-tiles, P2 and P3 (`docs/split_candidates.md`), or
-   an "unseen hazard type" variant. If you use val-tiles, decide whether to group
-   neighbouring tiles first, since tiles share borders.
-2. **Un-classified buildings:** drop them, ignore them in the loss, or keep them for
-   building-vs-background only. This matters most for Guatemala.
-3. **The invalid polygon:** repair with `buffer(0)`, or drop it. Either way, do it in the
-   label loader.
-4. **Tiny and edge-cut buildings:** keep, filter by a size threshold, or weight. 3,097
-   buildings are under 50 px², and 6.6% touch the tile edge (15.5% of un-classified).
-5. **Crop size and context padding:** `docs/data_quality.md` section 7 gives the
-   trade-offs per disaster and class.
-6. **Pre/post fusion** (stacking vs siamese vs difference image), in light of the
-   misalignment and resolution differences above. The trade-offs are in
-   `docs/model_primer.md` section 3.
+The report of the earlier data-quality session is in git history (`08e2cb1`).

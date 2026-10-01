@@ -31,7 +31,7 @@ roughly 15 GB. Not yet confirmed by a full run, because I was told not to start 
 | 8c | the deep ensemble (seeds 1 and 2) |
 | 9, 10, 11 | done, but only for the methods available from `siamese_s0` (max softmax probability, raw and temperature-scaled) |
 
-**To finish, run these in order** (each training run is about 25-30 minutes for siamese,
+**To finish**, either run `powershell -ExecutionPolicy Bypass -File scripts\finish_runs.ps1` (does all of the below; written but never executed), or run these in order (each training run is about 25-30 minutes for siamese,
 less for stack; watch memory in Task Manager during the first one):
 
 ```powershell
