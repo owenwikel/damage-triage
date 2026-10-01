@@ -154,6 +154,7 @@ def colour_stats(cache_dir, index, per_group=3000, seed=0):
                .apply(lambda g: pd.Series({**{c: np.average(g[c], weights=g["crops"]) for c in num},
                                            "crops": g["crops"].sum()}), include_groups=False)
                .reset_index())
+    pooled["crops"] = pooled["crops"].astype(int)
     return pooled.sort_values(["role", "disaster"]).reset_index(drop=True)
 
 
@@ -219,6 +220,28 @@ def main():
     stats = colour_stats(args.cache_dir, index, args.per_group)
     plot_colours(stats, args.fig_dir / "colour_statistics.png")
 
+    def cell(group, variant, column):
+        return float(swaps[(swaps["buildings"] == group) & (swaps["input"] == variant)][column].iloc[0])
+
+    # The same numbers as the table, said in words, so the pattern is easy to see.
+    shown = [f"- **val-tiles**: accuracy is {cell('val-tiles (all)', 'normal', 'accuracy'):.3f} "
+             f"normally and {cell('val-tiles (all)', 'both = post', 'accuracy'):.3f} when the pre "
+             "image is replaced by the post image (macro-F1 "
+             f"{cell('val-tiles (all)', 'normal', 'macro-F1'):.3f} and "
+             f"{cell('val-tiles (all)', 'both = post', 'macro-F1'):.3f}). With the post image "
+             f"blanked it is {cell('val-tiles (all)', 'post blank', 'accuracy'):.3f}; with the "
+             f"pre image blanked {cell('val-tiles (all)', 'pre blank', 'accuracy'):.3f}."]
+    for group in [g for g in swaps["buildings"].unique() if g.startswith("val: ")]:
+        truth = cell(group, "normal", "truly no-damage")
+        shown.append(
+            f"- **{group[5:]}** ({truth:.0%} of buildings truly undamaged): the model calls "
+            f"{cell(group, 'normal', 'predicted no-damage'):.0%} undamaged normally, "
+            f"{cell(group, 'both = pre', 'predicted no-damage'):.0%} when it sees the pre image "
+            f"twice and {cell(group, 'both = post', 'predicted no-damage'):.0%} when it sees the "
+            f"post image twice. Accuracy: {cell(group, 'normal', 'accuracy'):.3f} normally, "
+            f"{cell(group, 'pre blank', 'accuracy'):.3f} with the pre image blanked, "
+            f"{cell(group, 'both = post', 'accuracy'):.3f} with the post image twice.")
+
     names = ", ".join(f"`{r.name}`" for r in runs)
     show = ["role", "disaster", "crops", "pre brightness", "post brightness",
             "post - pre brightness", "pre contrast", "post contrast", "pre green excess",
@@ -237,7 +260,9 @@ def main():
          "- **pre blank / post blank**: one input is a flat grey image. Shows how much the "
          "model depends on that input.\n",
          df_to_markdown(swaps, float_fmt="{:.3f}", index=False) + "\n",
-         "How to read it:\n",
+         "The same numbers in words:\n",
+         *shown,
+         "\nHow to read it:\n",
          "- If 'both = post' on val predicts far less no-damage than on val-tiles, the "
          "post images of the unseen disasters look like damage to the model by "
          "themselves, whatever the pre image shows.",

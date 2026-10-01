@@ -349,9 +349,9 @@ def main():
                  f"(difference of means); on val-tiles macro-F1 {vt:+.3f}. The seeds' "
                  f"val macro-F1 ranges {'do not overlap' if apart_f1 else 'overlap'} and "
                  f"their val accuracy ranges {'do not overlap' if apart_acc else 'overlap'}"
-                 + (": with 3 seeds each, that is a difference worth taking seriously."
+                 + (f": with {len(base['runs'])} and {len(s['runs'])} seeds, that is a difference worth taking seriously."
                     if apart_f1 and apart_acc else
-                    ": with 3 seeds each, overlapping ranges mean the difference could be "
+                    f": with {len(base['runs'])} and {len(s['runs'])} seeds, overlapping ranges mean the difference could be "
                     "seed luck." if not (apart_f1 or apart_acc) else
                     ": mixed evidence."))
     best_val = max(settings, key=lambda n: np.mean([r["best"]["val"]["accuracy"]

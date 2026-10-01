@@ -1,4 +1,121 @@
-# Session report: modelling, sessions 1 and 2 (2026-10-01)
+# Session report (2026-10-01)
+
+## Session 3 (11:42-13:25): stopped early at your request
+
+You asked me to stop all background training at 13:24 because you were unplugging. All
+training was stopped then: no Python process is left running and the GPU is idle. The
+batch was about half done. **Validation only; the test set was not touched.**
+
+### Which runs finished
+
+All runs are the stack model with strong augmentation, under the new selection rule
+(mean of val-tiles and val macro-F1, averaged over a 3-epoch window).
+
+| setting | seed | status | val-tiles acc / macro-F1 | val acc / macro-F1 |
+|---|---|---|---|---|
+| base (`stack_aug`) | 0 | finished | 0.871 / 0.693 | 0.604 / 0.304 |
+| base | 1 | finished | 0.872 / 0.697 | 0.641 / 0.310 |
+| base | 2 | finished | 0.869 / 0.693 | 0.607 / 0.299 |
+| per-image normalisation (`stack_aug_pernorm`) | 0 | finished | 0.866 / 0.679 | 0.483 / 0.247 |
+| per-image normalisation | 1 | finished | 0.866 / 0.681 | 0.477 / 0.237 |
+| per-image normalisation | 2 | **stopped during epoch 10 of 10**; no results saved, not used anywhere | | |
+| histogram matching (`stack_aug_histmatch`) | 0, 1, 2 | **not started** | | |
+
+`runs/stack_aug_pernorm_s2/` holds a partial checkpoint and log from the stopped run;
+it has no `metrics.json`, so the report scripts ignore it. It must be retrained from the
+start, not resumed.
+
+### The one table: every setting, mean ± spread over seeds
+
+| setting | seeds | val-tiles accuracy | val-tiles macro-F1 | val accuracy | val macro-F1 |
+|---|---|---|---|---|---|
+| majority baseline | | 0.809 | 0.224 | 0.878 | 0.234 |
+| base | 3 | 0.870 ± 0.001 | 0.694 ± 0.002 | 0.617 ± 0.021 | 0.304 ± 0.005 |
+| base, ensemble of 3 | | 0.876 | 0.705 | 0.640 | 0.313 |
+| per-image normalisation | 2 of 3 | 0.866 ± 0.001 | 0.680 ± 0.001 | 0.480 ± 0.004 | 0.242 ± 0.007 |
+| per-image normalisation, ensemble of 2 | | 0.871 | 0.688 | 0.488 | 0.238 |
+| histogram matching | 0 of 3 | not run | | | |
+
+± is the standard deviation over seeds; ranges are in `docs/results.md` section 2.
+
+### What each step of the batch reached
+
+1. **Selection rule (3-epoch window): done.** `smoothed_score` in `src/train.py`. With it
+   the three base seeds agree on val (accuracy 0.604-0.641); under the old single-epoch
+   rule the same setting gave 0.613-0.761.
+2. **MC dropout dropped: done.** Out of the reports; `docs/results.md` section 6 records it
+   as tried and set aside, with its numbers. The code stays in `src/uncertainty.py`.
+3. **Does uncertainty flag failure on val? Done for the base** (`docs/results.md` section 3).
+   Single model, mean of 3 seeds, val against val-tiles: AUROC 0.739 against 0.901; the
+   least-confident 20% hold 33% of the mistakes (73% on val-tiles) and the
+   least-confident 50% hold 72% (97%); mean confidence 0.644 against 0.874, falling about
+   as much as accuracy does. The ensemble is inside the range of its members (AUROC
+   0.746). Short answer: partly. Confidence carries real information on val, far less
+   than on val-tiles.
+4. **Gap diagnosis: done** (`docs/gap_diagnosis.md`), on the three base seeds.
+   - midwest-flooding: the *pre* image carries the problem. Given the post image twice,
+     the model calls 96% of buildings undamaged (the truth is 96%) and accuracy is 0.936;
+     given the pre image twice it calls only 55% undamaged. Normal accuracy is 0.627.
+   - hurricane-florence: either image twice gives 88% undamaged; the real pair gives 60%
+     (truth 77%). There it is the difference between the two captures that reads as
+     damage. Florence also has the largest pre-to-post brightness change of any disaster
+     (-11.7 on a 0-255 scale).
+   - On val-tiles the model barely uses the pre image: accuracy is 0.870 normally and
+     0.869 with the post image in both slots.
+   - Average colours of the val disasters are mostly inside the range of the training
+     disasters, so overall colour alone does not obviously explain the gap.
+5. **Cheap fixes: half done.** Per-image normalisation, on 2 seeds, is clearly *worse* on
+   val (accuracy 0.480 against 0.617; the seeds' ranges do not overlap) and slightly
+   worse on val-tiles. Histogram matching was not run, so the batch's main comparison is
+   incomplete.
+6. **This report, commit, push: done.** `docs/error_analysis.md` and the demo figures
+   were rebuilt for the new base seed 0 before the stop.
+
+### Not verified before stopping
+
+The full test suite was not re-run after the last two small edits (a summary paragraph
+in `scripts/gap_diagnosis.py`, a wording fix in `scripts/make_results.py`). Both scripts
+were run on the real data afterwards and produced the documents committed here. The
+suite passed (the affected smoke tests included) just before those edits.
+
+### To pick up from here
+
+```powershell
+$py = ".\.venv\Scripts\python.exe"
+Remove-Item -Recurse runs\stack_aug_pernorm_s2          # the partial run
+& $py -m src.train --config configs\stack_aug_pernorm.json --seed 2 --num-workers 6
+foreach ($s in 0, 1, 2) { & $py -m src.train --config configs\stack_aug_histmatch.json --seed $s --num-workers 6 }
+& $py scripts\make_results.py
+```
+
+About 15 minutes per per-image run and an estimated 20-25 per histogram-matching run
+(not measured), with 6 loader workers: each run then owns about 17.5 GB of RAM, and the
+machine had 17-21 GB free during these runs.
+
+### Decisions for you
+
+1. **Finish histogram matching (and the third per-image seed)?** About 1.5 hours. Given
+   the diagnosis, I would still run histogram matching: Florence's problem looks like a
+   pre/post difference, which is what matching targets. It will not help midwest, where
+   the pre image itself is the issue.
+2. **Per-image normalisation looks like a dead end** on 2 seeds. Drop it, or spend 15
+   minutes on the third seed for completeness?
+3. **The model mostly ignores the pre image on the training disasters.** That may be the
+   root of the val gap: it classifies what the post image looks like instead of what
+   changed. Worth deciding whether to push the model towards comparing (for example by
+   training with some pairs where post is replaced by pre and the label set to
+   no-damage) before trying more preprocessing.
+4. **Loader workers.** I used 6 instead of 2 to fit the batch into the time; memory was
+   logged every epoch and stayed safe, but with less headroom than at 2 workers.
+5. Still open from before: when to open the test set (not yet, in my view); the batch cap
+   at 512; the 0.5 factor on the stack model's copied first-layer weights.
+
+---
+
+# Earlier: sessions 1 and 2 (2026-10-01)
+
+The runs described below used the earlier selection rule and are archived locally in
+`runs/old_rule/` (not in git).
 
 Session 1 (00:15-01:15) built the pipeline and trained the first model, then stopped on a
 memory problem. Session 2 (09:07-11:00) fixed that and ran everything that was missing,

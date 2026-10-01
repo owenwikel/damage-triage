@@ -578,11 +578,99 @@ less confident than its members, so the single model's T would over-correct it.
 
 ---
 
+## 12. Added in the third session
+
+The second session's main lesson was that on val, one training run is not a measurement:
+three runs differing only in their seed were 15 points of accuracy apart. Everything
+here follows from that.
+
+### a) A steadier selection rule (`smoothed_score` in `src/train.py`)
+
+**What.** The per-epoch selection score (mean of the val-tiles and val macro-F1) is
+averaged over the last 3 epochs. The weights kept are those of the last epoch of the
+best 3-epoch stretch; early stopping watches the same average.
+
+**Why.** The single-epoch rule kept epoch 4 in two of four runs, at a one-epoch spike in
+val. A spike is mostly luck; three good epochs in a row are less likely to be.
+
+**Alternatives.** Keep the middle epoch of the window (needs the previous checkpoint on
+disk); average the *weights* of the last few epochs (stochastic weight averaging); or no
+selection at all, simply the last epoch of the cosine schedule, where the learning rate
+has gone to zero and the model has settled.
+
+### b) Two preprocessing options (`src/dataset.py`)
+
+- `normalize="per_image"` (`normalize_image`): each image is shifted and scaled by its
+  own channel means and standard deviations, instead of ImageNet's fixed numbers.
+- `match_hist=True` (`match_histogram`): the post image is recoloured so each channel has
+  the pre image's distribution of values (cumulative histogram of post mapped onto that
+  of pre through a 256-entry lookup table).
+
+**Key lines.**
+
+- `lut = torch.searchsorted(ref_cdf, src_cdf)`: for each brightness level of the source,
+  the reference level with the same cumulative share of pixels. That one line is the
+  whole idea of histogram matching.
+- `CropDataset.from_config(cfg, part)`: every later evaluation of a model rebuilds the
+  dataset from the model's own saved config, so a model trained on histogram-matched
+  images can never be evaluated on unmatched ones by accident.
+
+**Why these two.** Both remove differences in overall colour and brightness, between
+disasters (per-image) or between the two captures (matching), which was the simplest
+explanation for the val gap. Both also remove real signal: floods and fires do change
+overall colour. Whether the trade is worth it is what `docs/results.md` section 2 tests.
+
+**A speed lesson.** `torch.std` took 1.5 ms per image on this machine; computing the
+standard deviation by hand takes 0.1 ms. Per-item costs are paid 135,000 times per epoch,
+so profile before trusting a one-liner.
+
+### c) Reporting mean ± spread (`spread`, section 2 of `docs/results.md`)
+
+Each setting is trained with 3 seeds and reported as mean ± standard deviation, with the
+range. Two settings whose ranges overlap cannot be told apart with this much data.
+
+### d) "Does uncertainty flag failure?" (`auroc`, `errors_caught` in `make_results.py`)
+
+- **AUROC** of confidence for telling correct from wrong predictions: the probability
+  that a random correct prediction is more confident than a random wrong one. Computed
+  from ranks; 0.5 is useless, 1.0 is perfect.
+- **Errors caught**: the share of all mistakes among the least-confident 20% / 50%.
+- **Mean confidence on val against val-tiles**: does the model notice it is on
+  unfamiliar ground?
+
+These measure *ranking* and *awareness*, where ECE measures calibration and accuracy
+measures correctness. A model can be good at one and bad at another.
+
+### e) Input swaps (`scripts/gap_diagnosis.py`)
+
+The trained model is fed the same image twice (pre, pre or post, post) or a blank in one
+slot. It costs no training, and shows which input the model's mistakes depend on. A
+model that really compares before and after should call nearly everything "no-damage"
+when both inputs are identical.
+
+### Interview questions
+
+1. *Three seeds give 0.61, 0.66 and 0.76 accuracy. A new idea gives 0.72 in one run. Did
+   it help?* You cannot tell: 0.72 is inside the range that seeds alone produce. You
+   need several runs of the new idea and a comparison of the two groups; even then,
+   with 3 runs each, only a clear separation is convincing.
+2. *Histogram matching made the two images look alike in colour. Why might that hurt?*
+   Because for some disasters the colour change IS the damage signal (burnt ground,
+   flood water, ash). Matching flattens it. It trades robustness to nuisance differences
+   for sensitivity to real ones.
+3. *Your model has 0.75 AUROC for detecting its own errors. Is that enough for triage?*
+   It depends on the error rate and the cost of a miss. With 40% of predictions wrong,
+   even a decent ranking leaves many mistakes among the confident ones; you would have
+   to send most buildings to a person to reach a low error rate among the rest. Ranking
+   quality and base accuracy both matter; the risk-coverage curve shows their combined
+   effect.
+
+---
+
 ## Things to try next (in rough order of expected value)
 
-1. Close the val gap further: per-image normalisation, training on more disaster types,
-   or matching the post image's colours to the pre image. Check whether the gap is in the
-   pre image, the post image, or both.
+1. Close the val gap: train on more disaster types, or larger context around buildings.
+   `docs/gap_diagnosis.md` shows which input the mistakes depend on.
 2. A lower learning rate for the backbone than for the head.
 3. Larger context (padding 32 instead of 16) for flood and fire disasters.
 4. Dropout inside the backbone, so MC dropout samples more than the head.
