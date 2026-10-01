@@ -68,7 +68,7 @@ def load_all(data_dir, splits):
 
     for split in splits:
 
-        df = load_labels(data_dir / split)
+        df = load_labels(data_dir / split, repair=False)  # the audit reports the raw outlines
 
         df.insert(0, "split", split)
 

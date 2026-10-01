@@ -193,7 +193,7 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading labels from {args.data_root} ...")
-    df = load_labels(args.data_root)
+    df = load_labels(args.data_root, repair=False)  # the invalid-polygon count needs raw outlines
     n_tiles = df.groupby(["disaster", "tile_id"], observed=True).ngroups
     # Tiles with zero buildings produce no rows, so count them from the label files instead.
     n_label_tiles = len(list((args.data_root / "labels").glob("*_post_disaster.json")))

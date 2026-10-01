@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from shapely import wkt as shapely_wkt
 
-from src.labels import DAMAGE_CLASSES, load_labels, parse_label_file
+from src.labels import DAMAGE_CLASSES, load_labels, parse_label_file, repair_polygon
 
 
 def _feature(subtype, wkt, uid):
@@ -96,6 +97,55 @@ def test_unknown_subtype_raises(tmp_path):
     _write_tile(tmp_path, "quake-z", "00000001", [("totally-flattened", SQUARE)])
     with pytest.raises(ValueError, match="totally-flattened"):
         load_labels(tmp_path)
+
+
+# A square whose outline runs up a spike and back down the same line: invalid, area 100.
+SPIKE = "POLYGON ((0 0, 10 0, 10 10, 5 10, 5 15, 5 10, 0 10, 0 0))"
+# A bow-tie: buffer(0) splits it, and the loader keeps one piece.
+BOWTIE = "POLYGON ((0 0, 10 10, 10 0, 0 10, 0 0))"
+
+
+def test_invalid_polygon_is_repaired(tmp_path):
+    _write_tile(tmp_path, "quake-z", "00000001", [("no-damage", SPIKE), ("destroyed", SQUARE)])
+    df = load_labels(tmp_path)
+    assert len(df) == 2  # repaired, not dropped
+    spike = df.iloc[0]
+    assert spike["polygon"].is_valid
+    assert spike["polygon"].geom_type == "Polygon"
+    assert spike["area_px"] == pytest.approx(100)
+    assert (spike["centroid_x"], spike["centroid_y"]) == pytest.approx((5, 5))
+
+
+def test_valid_polygon_is_left_untouched(tmp_path):
+    _write_tile(tmp_path, "quake-z", "00000001", [("no-damage", RECT)])
+    poly = load_labels(tmp_path).iloc[0]["polygon"]
+    assert list(poly.exterior.coords) == [(20, 30), (60, 30), (60, 40), (20, 40), (20, 30)]
+
+
+def test_repair_can_be_switched_off(tmp_path):
+    _write_tile(tmp_path, "quake-z", "00000001", [("no-damage", SPIKE)])
+    assert not load_labels(tmp_path, repair=False).iloc[0]["polygon"].is_valid
+
+
+def test_repair_always_gives_one_valid_polygon():
+    fixed = repair_polygon(shapely_wkt.loads(BOWTIE))
+    assert fixed.is_valid and fixed.geom_type == "Polygon" and fixed.area > 0
+
+
+def test_drop_unclassified(fake_root):
+    kept = load_labels(fake_root, drop_unclassified=True)
+    assert len(kept) == 3
+    assert "un-classified" not in set(kept["damage"])
+    assert kept["damage_level"].notna().all()
+    assert list(kept.index) == [0, 1, 2]
+    # nothing else changes: same rows as the default minus the un-classified one
+    everything = load_labels(fake_root)
+    assert set(everything["uid"]) - set(kept["uid"]) == {"00000002-0"}
+    assert list(kept["damage"].cat.categories) == DAMAGE_CLASSES
+
+
+def test_unclassified_is_kept_by_default(fake_root):
+    assert (load_labels(fake_root)["damage"] == "un-classified").sum() == 1
 
 
 def test_bad_file_name(tmp_path):

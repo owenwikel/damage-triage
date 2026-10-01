@@ -1,0 +1,160 @@
+"""Record the data-handling decisions, with the numbers they affect -> docs/data_decisions.md.
+
+Usage:
+    .\\.venv\\Scripts\\python.exe scripts\\data_decisions.py --data-dir C:\\Users\\wikel\\dev\\xbd-data
+
+The decisions themselves are fixed text in this script; the counts next to them are read
+from the data and from splits/split_v1.csv, so the document can be regenerated. The two
+decisions that change the data (dropping un-classified buildings, repairing invalid
+polygons) are implemented in src/labels.py.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.labels import load_labels, repair_polygon  # noqa: E402
+from src.reporting import df_to_markdown  # noqa: E402
+
+PARTS = ["train", "val-tiles", "val", "test"]
+TILE_SIZE = 1024
+TINY_PX2 = 50     # same thresholds as docs/data_quality.md sections 3 and 4
+EDGE_TOL = 1.0
+
+
+def with_total(t, label="all"):
+    t.loc[label] = t.sum()
+    return t.astype(int)
+
+
+def dropped_per_disaster(df):
+    """Buildings, un-classified (dropped) and kept, per disaster and split part."""
+    unc = df["damage"] == "un-classified"
+    t = pd.DataFrame({"part": df.groupby("disaster")["part"].agg(lambda s: " + ".join(
+                          p for p in PARTS if p in set(s))),
+                      "buildings": df.groupby("disaster").size(),
+                      "dropped (un-classified)": unc.groupby(df["disaster"]).sum()})
+    parts = t.pop("part")
+    t = with_total(t)
+    t["kept"] = t["buildings"] - t["dropped (un-classified)"]
+    t["share dropped"] = t["dropped (un-classified)"] / t["buildings"]
+    t.insert(0, "part", parts.reindex(t.index).fillna(""))
+    return t
+
+
+def dropped_per_part(df):
+    unc = df["damage"] == "un-classified"
+    t = pd.DataFrame({"buildings": df.groupby("part").size(),
+                      "dropped (un-classified)": unc.groupby(df["part"]).sum()})
+    t = with_total(t.reindex([p for p in PARTS if p in t.index]))
+    t["kept"] = t["buildings"] - t["dropped (un-classified)"]
+    t["share dropped"] = t["dropped (un-classified)"] / t["buildings"]
+    return t
+
+
+def repaired_polygons(df):
+    rows = []
+    for _, r in df[~df["polygon"].map(lambda p: p.is_valid)].iterrows():
+        fixed = repair_polygon(r["polygon"])
+        rows.append({"tile": f"{r['disaster']}_{r['tile_id']}", "uid": r["uid"],
+                     "part": r["part"], "damage": r["damage"],
+                     "area before (px²)": r["polygon"].area, "area after (px²)": fixed.area,
+                     "centroid moved (px)": r["polygon"].centroid.distance(fixed.centroid)})
+    return pd.DataFrame(rows)
+
+
+def tiny_and_edge(kept):
+    """Among kept buildings, per part: how many are tiny and how many are cut by the edge."""
+    b = np.array([p.bounds for p in kept["polygon"]]).reshape(-1, 4)
+    edge = ((b[:, 0] <= EDGE_TOL) | (b[:, 1] <= EDGE_TOL) |
+            (b[:, 2] >= TILE_SIZE - EDGE_TOL) | (b[:, 3] >= TILE_SIZE - EDGE_TOL))
+    k = kept.assign(tiny=(kept["area_px"] < TINY_PX2).to_numpy(), edge=edge)
+    t = k.groupby("part").agg(**{"kept buildings": ("tiny", "size"),
+                                f"tiny (< {TINY_PX2} px²)": ("tiny", "sum"),
+                                "cut by the tile edge": ("edge", "sum")})
+    t = with_total(t.reindex([p for p in PARTS if p in t.index]))
+    t["share tiny"] = t.iloc[:, 1] / t.iloc[:, 0]
+    t["share edge-cut"] = t.iloc[:, 2] / t.iloc[:, 0]
+    return t
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--data-dir", required=True, type=Path)
+    ap.add_argument("--folders", nargs="+", default=["train", "test"])
+    ap.add_argument("--split", type=Path, default=Path("splits/split_v1.csv"))
+    ap.add_argument("--out", type=Path, default=Path("docs/data_decisions.md"))
+    args = ap.parse_args()
+
+    # repair=False: load the outlines as annotated, so the repair can be shown before/after
+    df = pd.concat([load_labels(args.data_dir / f, repair=False) for f in args.folders],
+                   ignore_index=True)
+    df["disaster"] = df["disaster"].astype(str)
+    split = pd.read_csv(args.split, dtype=str)  # dtype=str keeps tile ids like 00000012
+    df = df.merge(split, on=["disaster", "tile_id"], how="left", validate="m:1")
+    if df["part"].isna().any():
+        raise ValueError(f"{int(df['part'].isna().sum())} buildings are on tiles missing "
+                         f"from {args.split}")
+
+    per_disaster, per_part = dropped_per_disaster(df), dropped_per_part(df)
+    repaired = repaired_polygons(df)
+    kept = df[df["damage"] != "un-classified"]
+    sizes = tiny_and_edge(kept)
+    n_drop = int(per_part.loc["all", "dropped (un-classified)"])
+
+    L = ["# Data decisions\n",
+         f"Generated by `scripts/data_decisions.py` from `{args.data_dir}` and "
+         f"`{args.split.as_posix()}`. The decisions are fixed; the counts are recomputed. "
+         "The evidence behind each one is in `docs/data_quality.md`.\n",
+         "| # | issue | decision | where it happens |",
+         "|---|---|---|---|",
+         "| 1 | un-classified buildings | dropped from training and evaluation | "
+         "`load_labels(..., drop_unclassified=True)` in `src/labels.py` |",
+         "| 2 | invalid polygon | repaired with `buffer(0)` | `repair_polygon` in "
+         "`src/labels.py`, on by default |",
+         "| 3 | tiny and edge-cut buildings | kept; accuracy will be reported by size bucket "
+         "later | nothing to do at load time |\n",
+         "## 1. Un-classified buildings: dropped\n",
+         "A building labelled `un-classified` has no damage level to learn from or to score "
+         f"against, so it is left out of both training and evaluation: **{n_drop:,} of "
+         f"{len(df):,} buildings ({n_drop / max(len(df), 1):.1%})**.\n",
+         "Per disaster:\n",
+         df_to_markdown(per_disaster, float_fmt="{:.1%}") + "\n",
+         "Per part of the split (`docs/split_final.md`):\n",
+         df_to_markdown(per_part, float_fmt="{:.1%}") + "\n",
+         "Dropping is opt-in: `load_labels` keeps un-classified buildings unless "
+         "`drop_unclassified=True` is passed, because the data reports (`docs/data_quality.md`, "
+         "`docs/split_candidates.md`) count them. Training and evaluation code must pass it.\n",
+         "## 2. Invalid polygon: repaired with `buffer(0)`\n"]
+    if len(repaired):
+        L += [f"{len(repaired)} outline(s) cross themselves. `buffer(0)` redraws the outline "
+              "without the crossing; the repair is applied in the label loader, so every "
+              "later step sees the same valid shape.\n",
+              df_to_markdown(repaired, float_fmt="{:.2f}", index=False) + "\n"]
+    else:
+        L.append("No invalid polygons in this data.\n")
+    L += ["If `buffer(0)` ever splits an outline into several pieces, the loader keeps the "
+          "largest piece, so a building is always one polygon. The audit scripts "
+          "(`audit_data.py`, `dataset_stats.py`) load with `repair=False` so they keep "
+          "reporting the outlines as annotated.\n",
+          "## 3. Tiny and edge-cut buildings: kept\n",
+          "No building is removed for being small or for being cut off by the tile border. "
+          "Accuracy will be reported by size bucket later, so their effect on the scores "
+          "can be seen. The buckets are not defined yet.\n",
+          f"How many kept buildings this concerns (tiny = footprint under {TINY_PX2} px²; "
+          f"edge-cut = bounding box within {EDGE_TOL:g} px of the tile border, the same "
+          "definitions as `docs/data_quality.md`):\n",
+          df_to_markdown(sizes, float_fmt="{:.1%}") + "\n"]
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text("\n".join(L), encoding="utf-8")
+    print(f"Wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()

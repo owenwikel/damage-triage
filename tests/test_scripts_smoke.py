@@ -80,6 +80,16 @@ def test_make_split(tmp_path):
     assert (tmp_path / "splits" / "split_blocks.csv").exists()
     assert doc.read_text(encoding="utf-8").startswith("# Final split")
 
+    # data_decisions.py reads the split that make_split.py just wrote
+    decisions = tmp_path / "decisions.md"
+    run("data_decisions.py", "--data-dir", data, "--split", out, "--out", decisions,
+        cwd=tmp_path)
+    text = decisions.read_text(encoding="utf-8")
+    # each fake tile has 3 buildings, one of them un-classified and touching the edge
+    assert "| all |  | 9 | 3 | 6 | 33.3% |" in text
+    assert "| train | 3 | 1 | 2 | 33.3% |" in text
+    assert "No invalid polygons in this data." in text
+
 
 def test_disaster_table(fake_xbd, tmp_path):
     out = tmp_path / "disasters.md"
