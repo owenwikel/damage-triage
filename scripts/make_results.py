@@ -216,6 +216,20 @@ def main():
                      "difference of a point or two is within what a different seed could "
                      "produce (compare the three seeds in section 5). The later sections "
                      f"use `{better}`.\n")
+        # Say plainly how the model compares with the no-image baselines on each split.
+        for part in PARTS:
+            maj = base[(base["split"] == part) & base["baseline"].str.startswith("majority")].iloc[0]
+            m = runs[better]["best"][part]
+            verdict = ("above" if m["accuracy"] > maj["accuracy"] else "**below**")
+            L.append(f"- On **{part}**, `{better}` has accuracy {m['accuracy']:.3f}, {verdict} "
+                     f"the majority-class baseline ({maj['accuracy']:.3f}), and macro-F1 "
+                     f"{m['macro_f1']:.3f} against the baselines' "
+                     f"{base[base['split'] == part]['macro-F1'].max():.3f}.")
+        gap = runs[better]["best"]["val-tiles"]["macro_f1"] - runs[better]["best"]["val"]["macro_f1"]
+        L.append(f"\nThe gap between val-tiles and val (macro-F1 {gap:+.3f}) is the main "
+                 "result so far: the model has learned the training disasters, not damage in "
+                 "general. `docs/error_analysis.md` breaks this down per disaster.\n"
+                 if gap > 0.15 else "")
         missing = [a for a in args.archs if a not in runs]
         if missing:
             L.append(f"**Not trained yet: {', '.join(f'`{a}`' for a in missing)}** (see "
@@ -227,7 +241,7 @@ def main():
                 "epoch": h["epoch"], "train loss": h["train_loss"], "train acc": h["train_acc"],
                 **{f"{p} {k}": h[p][v] for p in PARTS
                    for k, v in (("loss", "loss"), ("acc", "accuracy"), ("macro-F1", "macro_f1"))},
-                "seconds": h["epoch_seconds"]} for h in r["history"]])
+                "seconds": int(round(h["epoch_seconds"]))} for h in r["history"]])
             L += [f"Per epoch, `{r['run_name']}` (best epoch by val-tiles macro-F1: "
                   f"**{r['best_epoch']}**; training accuracy is measured on augmented "
                   "batches while the weights are still changing):\n",
@@ -298,10 +312,13 @@ def main():
               "- **MC dropout**: 20 passes with dropout left on; confidence = mean of the "
               "passes' top probabilities, or minus the entropy of the averaged probabilities"
               + ("" if any("MC" in h for h in have) else " *(not run yet)*") + ";",
-              f"- **ensemble**: probabilities averaged over {len(seeds)} models trained with "
-              f"different seeds ({', '.join(r['run_name'] for r in seeds)})"
-              + ("" if len(seeds) > 1 else " *(needs at least 2 finished seeds; not available)*")
-              + ".\n",
+              ("- **ensemble**: probabilities averaged over models trained with different "
+               "seeds " + (f"({', '.join(r['run_name'] for r in seeds)})" if len(seeds) > 1 else
+                           f"*(not available: only {seeds[0]['run_name']} has been trained)*")
+               + ".\n"),
+              ("" if len(have) > 2 else
+               "**Only the max-probability method is available in this version; MC dropout "
+               "and the ensemble are waiting on the runs listed in `BLOCKERS.md`.**\n"),
               "ECE: lower = confidence closer to accuracy. AURC (area under the "
               "risk-coverage curve): lower = mistakes are ranked lower, and/or fewer "
               "mistakes. For the entropy row, ECE is computed on the top averaged "
