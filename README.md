@@ -7,42 +7,53 @@ ones sent to a person.
 
 ## Status
 
-Data exploration, split and data decisions are done. A first model is trained and
-evaluated **on validation data only**. The test set (hurricane-michael,
-santa-rosa-wildfire) has not been loaded; code refuses to load it without `--final`
-(`src/split.py`).
-
-Still to run (see [BLOCKERS.md](BLOCKERS.md)): the second architecture ("stack"), the
-3-model ensemble and MC dropout.
+Data exploration, split and data decisions are done. Two architectures, an augmentation
+experiment and three uncertainty methods have been trained and compared **on validation
+data only**. The test set (hurricane-michael, santa-rosa-wildfire) has not been loaded;
+code refuses to load it without `--final` (`src/split.py`).
 
 ## Preliminary results (validation only)
 
-One model so far: a siamese ResNet-18 (`siamese_s0`, 10 epochs, about 3 minutes per epoch
-on an 8 GB laptop GPU). Full tables and figures: [docs/results.md](docs/results.md),
+Full tables and figures: [docs/results.md](docs/results.md),
 [docs/error_analysis.md](docs/error_analysis.md).
 
-| | buildings | accuracy | macro-F1 | majority-class baseline (accuracy / macro-F1) |
+| | val-tiles accuracy | val-tiles macro-F1 | val accuracy | val macro-F1 |
 |---|---|---|---|---|
-| **val-tiles**: held-out tiles of the 6 training disasters | 14,718 | 0.879 | 0.708 | 0.809 / 0.224 |
-| **val**: 2 disasters never trained on (both floods) | 19,099 | 0.451 | 0.243 | 0.878 / 0.234 |
+| majority-class baseline | 0.809 | 0.224 | 0.878 | 0.234 |
+| siamese ResNet-18, first run | 0.879 | 0.708 | 0.451 | 0.243 |
+| stack ResNet-18 | 0.871 | 0.685 | 0.676 | 0.297 |
+| stack + strong augmentation (base model) | 0.870 | 0.693 | 0.613 | 0.308 |
+| ensemble of 3 base models | 0.875 | 0.700 | 0.709 | 0.331 |
+
+- **val-tiles**: 14,718 buildings on held-out tiles of the 6 training disasters.
+- **val**: 19,099 buildings from 2 flood disasters never trained on. **val is used for
+  model selection** (the kept checkpoint maximises the mean of the val-tiles and val
+  macro-F1, and the architecture and augmentation were chosen on it), so its numbers are
+  somewhat optimistic. The first siamese row predates that rule.
 
 What this says, plainly:
 
-- **The model does not yet transfer to a new disaster.** On the two unseen flood disasters
-  it is less accurate than always answering "no-damage", and its macro-F1 is at the level
-  of guessing. On midwest-flooding it calls about 70% of undamaged buildings damaged.
-- On tiles from disasters it trained on, it is well above the baselines, but unevenly:
-  near-perfect where almost everything is undamaged (mexico-earthquake), weak on
-  hurricane-matthew and hurricane-harvey.
-- **Confidence is useful where the model is competent, and not where it is not.** On
-  val-tiles, keeping the most confident 80% of predictions raises accuracy from 0.879 to
-  0.965; on val the same rule only moves it from 0.451 to 0.496.
-- Temperature scaling (T = 1.60) fixes calibration on val-tiles (ECE 0.045 to 0.011) but
-  the model stays over-confident on val (ECE 0.272 to 0.170).
+- **The model still does not transfer well to a new disaster.** On val every model is less
+  accurate than always answering "no-damage" (0.878). Macro-F1 is above the baseline
+  (0.33 against 0.23) but far below val-tiles (0.70).
+- Stack edged out siamese, and stronger augmentation changed little for a single model
+  (val macro-F1 +0.01, val accuracy -0.06). Single runs differ by more than that from
+  seed to seed, so neither comparison is settled.
+- **On val, the seed matters more than anything else that was varied.** Three runs of the
+  same model differ only in their random seed and score 0.61, 0.66 and 0.76 accuracy on
+  val (0.86-0.87 on val-tiles). The ensemble of the three lands at 0.71: better than the
+  typical member, not better than the best one. What it buys is that the result no
+  longer depends on which seed was trained. Keeping its most confident 50% of val
+  predictions gives 0.90 accuracy.
+- **MC dropout adds nothing here.** Dropout sits only in front of the last layer, and its
+  confidence is practically the same as the plain top probability.
+- On val-tiles, confidence works: keeping the most confident 80% raises accuracy from
+  0.87 to 0.96. With an inspection budget of 20% of buildings, ranking by "most likely
+  damaged" reaches 79% of the damaged buildings on val-tiles and 47% on val.
 
 A held-out tile of a training disaster (palu-tsunami) and a tile of an unseen disaster
-(hurricane-florence). REVIEW marks buildings below the confidence threshold. More in
-[docs/demo.md](docs/demo.md).
+(hurricane-florence), from the single base model. REVIEW marks buildings below the
+confidence threshold. More in [docs/demo.md](docs/demo.md).
 
 ![palu-tsunami demo tile](outputs/demo/palu-tsunami_00000166.jpg)
 
@@ -71,12 +82,21 @@ A held-out tile of a training disaster (palu-tsunami) and a tile of an unseen di
 ## Reproduce
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_crops.py --data-dir C:\Users\wikel\dev\xbd-data
-.\.venv\Scripts\python.exe -m src.train --config configs\siamese.json
-.\.venv\Scripts\python.exe scripts\make_results.py
-.\.venv\Scripts\python.exe scripts\error_analysis.py --run runs\siamese_s0
-.\.venv\Scripts\python.exe scripts\demo_figures.py --run runs\siamese_s0 --data-dir C:\Users\wikel\dev\xbd-data
+$py = ".\.venv\Scripts\python.exe"
+& $py scripts\build_crops.py --data-dir C:\Users\wikel\dev\xbd-data
+& $py -m src.train --config configs\siamese.json
+& $py -m src.train --config configs\stack.json
+& $py -m src.train --config configs\stack_aug.json            # base model, seed 0
+& $py -m src.train --config configs\stack_aug.json --seed 1
+& $py -m src.train --config configs\stack_aug.json --seed 2
+& $py -m src.uncertainty --run runs\stack_aug_s0 --passes 20  # MC dropout
+& $py scripts\make_results.py
+& $py scripts\error_analysis.py --run runs\stack_aug_s0
+& $py scripts\demo_figures.py --run runs\stack_aug_s0 --data-dir C:\Users\wikel\dev\xbd-data
 ```
+
+A training run takes 15-30 minutes on an 8 GB laptop GPU and about 10 GB of RAM. None of
+these commands touches the test set.
 
 ## Setup
 

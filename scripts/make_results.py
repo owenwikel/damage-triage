@@ -329,13 +329,15 @@ def main():
                   df_to_markdown(comparison_rows([plain, aug]), float_fmt="{:.3f}", index=False) + "\n",
                   f"**Judged on val (the unseen disasters): macro-F1 {d_val:+.3f}, accuracy "
                   f"{d_acc:+.3f}; on val-tiles macro-F1 {d_vt:+.3f}.** "
-                  + ("The stronger augmentation helps on val. "
-                     if d_val > 0.01 else
-                     "The stronger augmentation does not help on val. "
-                     if d_val < -0.01 else
-                     "On val macro-F1 the two are within a point of each other. ")
-                  + "This is a single run per setting, so small differences are not "
-                  "evidence either way.\n"]
+                  + ("A mixed result: the two val metrics move in opposite directions. "
+                     if d_val * d_acc < 0 and abs(d_acc) > 0.02 else
+                     "The stronger augmentation helps on val. " if d_val > 0.01 else
+                     "The stronger augmentation does not help on val. " if d_val < -0.01 else
+                     "On val the two are within a point of each other. ")
+                  + "This is a single run per setting, and val macro-F1 moves by several "
+                  "points from one epoch to the next within a run (tables below), so a "
+                  "difference of this size is not evidence either way. What the experiment "
+                  "does show: this augmentation alone does not close the gap to val-tiles.\n"]
             L += versus_baseline(aug)
             L += [f"\n![confusion matrices, original vs strong augmentation]({fig_rel}/confusion_augmentation.png)\n",
                   df_to_markdown(cost_rows([aug]), float_fmt="{:.1f}", index=False) + "\n"]
@@ -350,7 +352,7 @@ def main():
                 **{f"{p} {k}": h[p][v] for p in PARTS
                    for k, v in (("acc", "accuracy"), ("macro-F1", "macro_f1"))},
                 "selection score": mean_score(h),
-                "RAM free GB": h.get("memory", {}).get("ram_available_gb", np.nan),
+                "RAM free GB": (f"{h['memory']['ram_available_gb']:.0f}" if "memory" in h else ""),
             } for h in run_["history"]])
             L += [f"Per epoch, `{r}` (kept: epoch **{run_['rule_epoch']}**):\n",
                   df_to_markdown(epochs, float_fmt="{:.3f}", index=False) + "\n"]
@@ -448,12 +450,44 @@ def main():
               f"![risk-coverage curves]({fig_rel}/risk_coverage.png)\n",
               f"![reliability per method]({fig_rel}/reliability_methods.png)\n"]
         if has_ens:
-            per_seed = [{"run": r["run_name"], "epoch kept": r["best_epoch"],
-                         **{f"{p} {k}": r["best"][p][v] for p in PARTS
-                            for k, v in (("accuracy", "accuracy"), ("macro-F1", "macro_f1"))}}
-                        for r in seeds]
-            L += ["The individual ensemble members, to show how much a seed alone changes:\n",
-                  df_to_markdown(pd.DataFrame(per_seed), float_fmt="{:.3f}", index=False) + "\n"]
+            # Each member on its own (temperature-scaled max prob), next to the ensemble,
+            # so the ensemble is compared with all of its members and not only seed 0.
+            per_seed = []
+            for r in seeds:
+                own, _ = collect_methods(r["dir"], [])
+                row = {"model": r["run_name"], "epoch kept": r["best_epoch"]}
+                for p in PARTS:
+                    m = own[p]["max prob (temp. scaled)"]
+                    cov = at_coverage(m["confidence"], labels[p], m["pred"], (1.0, 0.5))
+                    row.update({f"{p} accuracy": cov[0]["accuracy"],
+                                f"{p} macro-F1": r["best"][p]["macro_f1"],
+                                f"{p} AURC": aurc(m["confidence"], m["pred"] == labels[p]),
+                                f"{p} accuracy at 50% coverage": cov[1]["accuracy"]})
+                per_seed.append(row)
+            ens_name = [n for n in methods["val"] if n.startswith("ensemble")][0]
+            row = {"model": ens_name, "epoch kept": ""}
+            for p in PARTS:
+                m = methods[p][ens_name]
+                cov = at_coverage(m["confidence"], labels[p], m["pred"], (1.0, 0.5))
+                row.update({f"{p} accuracy": cov[0]["accuracy"],
+                            f"{p} macro-F1": summarize(labels[p], m["pred"])["macro_f1"],
+                            f"{p} AURC": aurc(m["confidence"], m["pred"] == labels[p]),
+                            f"{p} accuracy at 50% coverage": cov[1]["accuracy"]})
+            per_seed.append(row)
+            val_acc = [r_["val accuracy"] for r_ in per_seed[:-1]]
+            L += ["**The ensemble next to each of its members** (each member with its own "
+                  "temperature-scaled top probability):\n",
+                  df_to_markdown(pd.DataFrame(per_seed), float_fmt="{:.3f}", index=False) + "\n",
+                  f"The members agree closely on val-tiles and differ widely on val (accuracy "
+                  f"{min(val_acc):.3f} to {max(val_acc):.3f}): same code, same data, only the "
+                  "seed differs. The tables above compare the ensemble with seed 0, which "
+                  + ("happens to be the weakest member on val" if val_acc[0] == min(val_acc)
+                     else "is one member among several")
+                  + ", so part of the ensemble's advantage there is simply that it is not "
+                  "seed 0. Against its best member on val the ensemble "
+                  + ("is not better" if per_seed[-1]["val accuracy"] < max(val_acc) else "is better")
+                  + ". What the ensemble reliably buys is that the result no longer depends "
+                  "on which seed you happened to train.\n"]
 
         # 7. triage
         rows = []

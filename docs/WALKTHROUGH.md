@@ -161,8 +161,9 @@ arrays per part plus an `index.csv`.
   unseen disasters look.
 - *Augmentation in the Dataset (CPU)* rather than on the GPU: simplest to read and test.
   GPU augmentation would be faster but harder to follow.
-- *Not done:* random crops/scale jitter, mixup, heavier colour augmentation. Each is a
-  possible next experiment.
+- *A second, "strong" setting* (`augment="strong"`), added for the val-gap experiment:
+  section 11 below.
+- *Not done:* random crops/scale jitter, mixup. Each is a possible next experiment.
 
 **Interview questions.**
 
@@ -217,8 +218,9 @@ that maps `(pre, post)` to four logits. Both use one pretrained ResNet-18.
   learn to subtract), or only the difference (loses "what kind of building is this").
 - *Misalignment* (`docs/data_quality.md` section 6: unmeasured, plausibly a few pixels) is
   the main argument for late fusion; local change detection is the main argument for
-  early fusion. Which wins is empirical: see `docs/results.md` section 3 (at the time of
-  writing only the siamese model has been trained; see `BLOCKERS.md`).
+  early fusion. Which wins is empirical: see `docs/results.md` section 3. (With one seed
+  each, stack came out slightly ahead on the selection score, mostly through val. That
+  does not settle the argument: one seed is one sample.)
 
 **Interview questions.**
 
@@ -284,8 +286,9 @@ softmax, expected calibration error (ECE), reliability bins. Plain numpy.
 ## 6. `src/train.py`: the training loop
 
 **What it does.** Builds data, model, loss, optimiser and schedule from a `Config`, trains,
-evaluates on val-tiles and val every epoch, keeps the best weights by val-tiles macro-F1,
-stops early, and writes everything to `runs/<run_name>/`.
+evaluates on val-tiles and val every epoch, keeps the best weights (by the mean of the
+val-tiles and val macro-F1; see section 11), stops early, logs memory use, and writes
+everything to `runs/<run_name>/`.
 
 **Key lines.**
 
@@ -321,9 +324,10 @@ scheduler.step()                              # learning rate follows the schedu
   and throughput (samples per second) was the same at 128, 256 and 512 anyway. On
   Windows the probe must not exceed the card: the driver spills into system RAM and
   crawls instead of failing (this happened once during the session).
-- *Early stopping on val-tiles macro-F1.* Not on val: it is floods only and too small in
-  two classes to steer by. The price: val-tiles is spatially close to train, so the
-  stopping point is tuned to "familiar" data.
+- *Which epoch to keep.* The first run kept the epoch with the best val-tiles macro-F1.
+  That rewarded fitting the training disasters: val-tiles kept creeping up while val was
+  flat or worse. The rule is now the mean of the val-tiles and val macro-F1
+  (`selection_score`). Section 11 explains the price.
 - *Sanity check first (`--overfit 256`).* Under a minute, and it rules out a broken pipeline.
 
 **Interview questions.**
@@ -492,11 +496,93 @@ model was run.
 
 ---
 
+## 11. Added in the second session
+
+Four things changed after the first results. Each is small in code and worth
+understanding, because each is a decision someone could challenge.
+
+### a) Model selection uses val too (`selection_score` in `src/train.py`)
+
+**What.** The kept epoch is the one with the highest *mean* of the val-tiles and val
+macro-F1. Early stopping counts epochs without improvement of that same score.
+
+**Why.** val-tiles alone picked late epochs that had specialised in the training
+disasters. val alone would be noisy: two flood disasters, few minor-damage and destroyed
+buildings, and its score swings by several points from one epoch to the next.
+
+**The price.** val now takes part in choosing the weights (and, in this session, the
+architecture and the augmentation). Any number picked as "the best of several" is biased
+upwards, and the noisier the number, the larger the bias. So val is no longer a clean
+estimate of performance on a new disaster. Only the test set is.
+
+### b) Memory: fewer workers, cheaper items, a memory log
+
+**What.** Two loader workers instead of eight; evaluation in the main process;
+`CropDataset._to_tensor` makes the tensor contiguous before doing arithmetic;
+`memory_snapshot` writes RAM and GPU memory into every epoch's log line.
+
+**Key lines.**
+
+- `.permute(2, 0, 1).contiguous().float().div_(255.0)`: `permute` only changes how the
+  axes are read; arithmetic on the result is slow until `.contiguous()` copies it into
+  plain order. Time per item fell from about 2 ms to about 0.4 ms without augmentation.
+- `psutil.Process().children(recursive=True)`: the workers are child processes; their
+  memory has to be added to the main process's to see what the run really uses.
+
+**Why it matters.** The first run had no memory numbers in its own log and nearly
+exhausted the machine. Fewer workers only works because each item got cheaper: with the
+old per-item cost, two workers could not have kept the GPU busy.
+
+### c) The "strong" augmentation (`augment_pair(..., "strong")` in `src/dataset.py`)
+
+**What.** Brightness, contrast and saturation within +-30% and a +-10% colour cast,
+drawn independently for pre and post; and the post image shifted against the pre image
+by up to 4 px each way (`_shift`: pad by repeating the border, then cut at an offset).
+
+**Why.** The unseen disasters look different (darker, greener, brown flood water), and
+the stack model compares pre and post pixel by pixel, so it is the one most exposed to
+misalignment. If colours and exact alignment are unreliable during training, the model
+has to lean on structure instead.
+
+**Alternatives.** Histogram matching of post to pre; per-image normalisation; domain
+adaptation methods; or simply training on more disasters. The shift could be drawn in
+tile pixels instead of crop pixels (a crop of a small building is magnified more, so the
+same 4 crop pixels are a smaller real shift).
+
+**Result.** `docs/results.md` section 4. One run per setting: treat the difference as a
+hint, not a measurement.
+
+### d) Temperatures for MC dropout and the ensemble (`collect_methods`)
+
+**What.** MC-dropout passes are divided by the same T as the single model. The ensemble
+gets its own T, fitted on val-tiles to `log(mean probability)`.
+
+**Why.** Otherwise the comparison of methods mixes two things: how good a method's
+ranking is, and whether it happened to be calibrated. An average of several models is
+less confident than its members, so the single model's T would over-correct it.
+
+### Interview questions
+
+1. *You selected the checkpoint using val and then report val. What is wrong with that
+   number?* It is the maximum over several noisy evaluations, so it is biased upwards:
+   part of what looks like a good epoch is luck on those particular buildings. The
+   honest estimate needs data that played no part in any choice, here the test set.
+2. *Training got slower when you cut the workers from 8 to 2, right?* No: the per-item
+   work was made about four times cheaper at the same time, so two workers deliver
+   batches about as fast as the GPU consumes them. Worker count only helps while data
+   loading is the bottleneck, and each worker costs memory and start-up time.
+3. *Why shift only the post image, and why by whole pixels with border repeat?* Only the
+   relative offset between the two images matters to the model. Whole-pixel shifts need
+   no interpolation, so the image is not blurred; repeating the border avoids the black
+   bars or wrap-around that the model could learn to recognise as "this was shifted".
+
+---
+
 ## Things to try next (in rough order of expected value)
 
-1. Close the val gap: stronger colour/contrast augmentation, per-image normalisation, or
-   training on more disaster types. Check whether the gap is in the pre image, the post
-   image, or both.
+1. Close the val gap further: per-image normalisation, training on more disaster types,
+   or matching the post image's colours to the pre image. Check whether the gap is in the
+   pre image, the post image, or both.
 2. A lower learning rate for the backbone than for the head.
 3. Larger context (padding 32 instead of 16) for flood and fire disasters.
 4. Dropout inside the backbone, so MC dropout samples more than the head.

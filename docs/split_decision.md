@@ -29,3 +29,12 @@ does on Santa Rosa.
 About half the val-tiles tiles border training tiles, so val-tiles scores will be
 optimistic. Comparing them with val (unseen disasters) shows how much the model relies
 on familiar surroundings.
+
+## Update, 2026-10-01: val is now used for model selection
+The first model was selected on val-tiles alone and did not transfer to val. Since then
+the checkpoint that is kept is the one with the highest average of the val-tiles and val
+macro-F1, and the architecture and augmentation were chosen by looking at val. So val is
+no longer an untouched estimate of performance on a new disaster; its scores are somewhat
+optimistic. Val-tiles is still what the temperature is fitted on. The test set (Michael,
+Santa Rosa) remains untouched and is the only clean estimate left. (Note added by Claude
+at my request.)

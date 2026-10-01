@@ -1,123 +1,143 @@
-# Session report: first modelling session (2026-10-01, 00:15-01:15)
+# Session report: modelling, sessions 1 and 2 (2026-10-01)
 
-**Short version.** The pipeline is built end to end and one model (siamese ResNet-18) is
-trained and analysed on validation data. The session stopped after about 1 hour of the
-planned 5: the machine ran low on memory during the first training run, the queued
-training jobs were stopped, and I was told not to restart them without being asked. So
-the stack model, the ensemble and MC dropout are **not done**. `BLOCKERS.md` has the
-details; `scripts\finish_runs.ps1` runs everything that is missing.
+Session 1 (00:15-01:15) built the pipeline and trained the first model, then stopped on a
+memory problem. Session 2 (09:07-11:00) fixed that and ran everything that was missing,
+in the order you gave. This report covers both.
 
 **The test set was never loaded, evaluated or looked at.** Every loader goes through
 `src/split.py`, which raises unless `--final` / `final=True` is given, and the crop cache
-contains no test crops. I also did not run the optional test that re-derives the split
-from the raw data (`XBD_DATA_DIR`), because it reads the coordinates in test tiles'
-label files.
+contains no test crops. The optional test that re-derives the split from raw data
+(`XBD_DATA_DIR`) was not run, because it reads test tiles' label files.
 
-## What ran
+**val is now used for model selection**, as you decided: the kept checkpoint maximises
+the mean of the val-tiles and val macro-F1, and the architecture and augmentation were
+chosen with val in view. val numbers below are therefore somewhat optimistic. This is
+noted in `docs/results.md`, `docs/split_decision.md`, `README.md` and
+`docs/WALKTHROUGH.md`.
 
-| step | status | output | commit |
-|---|---|---|---|
-| 0. move split_decision.md | done | `docs/split_decision.md`; `docs/docs/` removed | `7ae8125` |
-| 1. crop cache | done | `scripts/build_crops.py`, `src/crops.py`, `src/split.py` (guard). 168,477 buildings (train 134,660, val-tiles 14,718, val 19,099), **15.45 GB** in `C:\Users\wikel\dev\xbd-data\crops\`, built in 82 s | `45129ad` |
-| 2. dataset | done | `src/dataset.py`, tests on a synthetic cache | `1cb4668` |
-| 3. models | done | `src/model.py` (siamese, stack), `src/metrics.py` | `e0fc09c` |
-| 4. training loop | done | `src/train.py`, `configs/`. Sanity check: 256 crops overfitted to **100%** in 4 epochs | `56a4f63` |
-| 5. baselines | done | `docs/results.md` section 1 | `d83850f` |
-| 6. siamese and stack | **half**: siamese trained; stack not | `docs/results.md` section 3 | `d83850f` |
-| 7. calibration | done (on siamese) | `src/calibrate.py`, `docs/results.md` section 4 | `e5acc4f`, `d83850f` |
-| 8. uncertainty methods | **a only**: max softmax. MC dropout and ensemble code is written and tested, not run | `src/uncertainty.py`, `docs/results.md` section 5 | `e5acc4f`, `d83850f` |
-| 9. triage | done for the max-softmax method | `src/triage.py`, `docs/results.md` section 6 | `e5acc4f`, `d83850f` |
-| 10. error analysis | done | `docs/error_analysis.md`, gallery in `runs/siamese_s0/gallery/` | `fa2202c` |
-| 11. demo figures | done | `outputs/demo/` (6 tiles), `docs/demo.md` | `1d7946f` |
-| 12. walkthrough, README, this report | done | `docs/WALKTHROUGH.md`, `README.md` | `c355c93`, final commit |
+## What ran in session 2
 
-Tests: **112 pass, 1 skipped** (the real-data test mentioned above). CI now installs
-CPU PyTorch so the model and dataset tests run there too.
-
-## Results (validation only)
-
-`siamese_s0`: 10 epochs, best epoch 8 by val-tiles macro-F1, batch 512, about 150 s of
-training per epoch (196 s with evaluation), GPU peak 5.0 GB allocated / 8.0 GB reserved.
-
-| | accuracy | macro-F1 | recall no-dmg / minor / major / destroyed |
-|---|---|---|---|
-| val-tiles, siamese | 0.879 | 0.708 | 0.93 / 0.50 / 0.74 / 0.74 |
-| val-tiles, majority baseline | 0.809 | 0.224 | 1 / 0 / 0 / 0 |
-| val-tiles, weighted random | 0.615 | 0.248 | 0.74 / 0.09 / 0.09 / 0.08 |
-| val, siamese | **0.451** | **0.243** | 0.47 / 0.28 / 0.35 / 0.21 |
-| val, majority baseline | 0.878 | 0.234 | 1 / 0 / 0 / 0 |
-| val, weighted random | 0.660 | 0.236 | 0.74 / 0.09 / 0.09 / 0.08 |
-
-| | val-tiles | val |
+| step | what | result |
 |---|---|---|
-| ECE before / after temperature scaling (T = 1.60) | 0.045 / 0.011 | 0.272 / 0.170 |
-| accuracy at 100 / 80 / 50% coverage | 0.879 / 0.965 / 0.994 | 0.451 / 0.496 / 0.586 |
-| area under the risk-coverage curve | 0.020 | 0.371 |
-| damaged buildings reached visiting 20%, "most likely damaged first" | 80.7% | 29.8% |
-| same, visiting at random | 20% | 20% |
+| prep | selection on the mean of val-tiles and val macro-F1; 2 loader workers; RAM and GPU memory logged every epoch; per-item loading made about 4x cheaper | `9b5646d` |
+| 1 | `stack_s0`, same settings as siamese | stack is ahead on the selection score (0.491 vs 0.480) |
+| 2 | `stack_aug_s0`: strong colour jitter, independent for pre and post, plus +-4 px pre/post shifts | mixed on val: macro-F1 +0.011, accuracy -0.063. Taken as base model (higher val macro-F1 and selection score) |
+| 3 | MC dropout (20 passes), seeds 1 and 2, 3-model ensemble | all done |
+| 3 | calibration, triage, inspection budget, error analysis for every method | `docs/results.md`, `docs/error_analysis.md` |
+| 4 | results, error analysis, demo figures, walkthrough section 11, README | rebuilt |
 
-## Surprises
+No run died, so nothing was retried. The last training run started at 10:26, well inside
+the 4-hour limit. Tests: **120 pass, 1 skipped** (the real-data test above).
 
-1. **The model fails on unseen disasters.** On val it is less accurate than always
-   answering "no-damage", and its macro-F1 is at guessing level. midwest-flooding is the
-   worst: only 31% of undamaged buildings are called undamaged. The crops were checked by
-   eye and are correct; val imagery is visibly darker and greener than train, and the
-   post-flood images are brown water. This is the main result of the session and the
-   first thing to work on.
-2. **Even val-tiles is uneven.** 0.879 overall hides mexico-earthquake at 0.997 (nearly
-   all no-damage) next to hurricane-matthew at 0.537 (no-damage recall 0.10) and
-   hurricane-harvey at 0.655.
-3. **Your boundary hypothesis holds on val-tiles, not on val.** Mean confidence rises
-   from 0.67 for buildings within 25 px of a differently-labelled building to 0.89 beyond
-   200 px (rank correlation +0.50). On val there is no relation (+0.02): there the model
-   is unsure everywhere.
-4. **Label-noise candidates are lower-confidence** on val-tiles (mean 0.68 against 0.88),
-   and the model agrees with their labels only 43% of the time (89% elsewhere).
-5. **Some of the 20 most confident mistakes look like label problems.** Three are labelled
-   no-damage where the building is simply gone in the post image (palu-tsunami tile 170).
-   Most of the rest are damaged buildings called no-damage that look intact from above.
-   Worth ten minutes with `runs/siamese_s0/gallery/confident_mistakes.png`.
-6. **Size and tile edge matter less than expected.** No clear trend with size on
-   val-tiles; edge-cut buildings are slightly worse (0.855 against 0.881 accuracy).
-7. **Memory, not the GPU, was the bottleneck.** 24 data-loader processes used about 59 of
-   62 GB. Throughput was the same at batch 128, 256 and 512, so a big batch bought
-   nothing in speed.
+## Results across all runs (validation only)
+
+Each row is the epoch the selection rule picks.
+
+| run | what it is | epoch kept | val-tiles acc | val-tiles macro-F1 | val acc | val macro-F1 |
+|---|---|---|---|---|---|---|
+| majority baseline | always "no-damage" | | 0.809 | 0.224 | 0.878 | 0.234 |
+| weighted random | guess by class frequency | | 0.615 | 0.248 | 0.660 | 0.236 |
+| `siamese_s0` | siamese, base augmentation | 10 (weights saved: 8) | 0.880 | 0.704 | 0.483 | 0.256 |
+| `stack_s0` | stack, base augmentation | 4 of 7 | 0.871 | 0.685 | 0.676 | 0.297 |
+| `stack_aug_s0` | stack, strong augmentation | 9 of 10 | 0.870 | 0.693 | 0.613 | 0.308 |
+| `stack_aug_s1` | same, seed 1 | 9 of 10 | 0.870 | 0.693 | 0.657 | 0.310 |
+| `stack_aug_s2` | same, seed 2 | 4 of 7 | 0.862 | 0.669 | 0.761 | 0.337 |
+| ensemble of 3 | `stack_aug` seeds 0-2 averaged | | 0.875 | 0.700 | 0.709 | 0.331 |
+
+`siamese_s0` was trained before the selection rule changed: the row is epoch 10 from its
+log, but its saved weights are epoch 8 (val 0.451 / 0.243). It is not the base model, so
+it was not retrained.
+
+Uncertainty methods on the base model (`stack_aug`):
+
+| method | val-tiles ECE | val ECE | val-tiles AURC | val AURC | val accuracy at 80% / 50% coverage |
+|---|---|---|---|---|---|
+| max prob, raw | 0.033 | 0.094 | 0.024 | 0.204 | 0.677 / 0.793 |
+| max prob, temperature-scaled (T = 1.27) | 0.015 | 0.043 | 0.024 | 0.202 | 0.676 / 0.795 |
+| MC dropout, mean max prob | 0.016 | 0.042 | 0.024 | 0.202 | 0.677 / 0.796 |
+| MC dropout, entropy | 0.016 | 0.041 | 0.024 | 0.202 | 0.670 / 0.793 |
+| ensemble of 3 | 0.015 | 0.042 | 0.024 | 0.125 | 0.785 / 0.897 |
+| ensemble of 3, temperature-scaled (T = 1.10) | 0.010 | 0.055 | 0.024 | 0.125 | 0.785 / 0.897 |
+
+On val-tiles all methods are about the same: accuracy 0.87 overall, 0.96 at 80% coverage,
+0.99 at 50%. Inspection budget of 20% of buildings, "most likely damaged first": about
+78-79% of damaged buildings reached on val-tiles and 47% on val, for every method.
+
+Time and memory: stack runs took 102-152 s of training per epoch (strong augmentation is
+the slower end, because 2 workers then limit the speed), each run owned at most 9.6 GB of
+RAM, the machine had 25-27 GB free throughout, and GPU memory peaked at 4.1 GB.
+
+## What the results say
+
+1. **The val gap is still there.** Every model is less accurate on val than always
+   answering "no-damage" (0.878). Macro-F1 on val (0.30-0.34) is above the baselines
+   (0.23) and far below val-tiles (0.69-0.70).
+2. **On val, the seed matters more than the architecture or the augmentation.** Three
+   identical runs differing only in seed score 0.613, 0.657 and 0.761 accuracy on val;
+   on val-tiles they are within a point of each other. Within a run, val macro-F1 also
+   jumps by several points between epochs. The stack-vs-siamese and augmentation
+   comparisons, one run each, are smaller than this spread, so neither is settled.
+3. **The ensemble is not better than its best member on val** (0.709 against 0.761
+   accuracy; AURC 0.125 against 0.105). It beats seed 0, which happens to be the weakest
+   member. What it gives is a result that does not depend on the luck of one seed.
+4. **MC dropout adds nothing.** Its confidence is almost identical to the plain top
+   probability, because dropout sits only in front of the last layer.
+5. **Temperature scaling works on val-tiles and carries over to val for the single
+   model** (ECE 0.094 to 0.043). For the ensemble it made val slightly worse (0.042 to
+   0.055): an ensemble is already less over-confident.
+6. **Stack with strong augmentation is far better calibrated on val than the first
+   siamese model** (ECE 0.043 against 0.170 after scaling), and midwest-flooding went from
+   0.31 to 0.63 accuracy. With one run each I cannot say how much of that is the
+   architecture, the augmentation, the selection rule or the seed.
+7. **Boundary hypothesis:** still holds on val-tiles (rank correlation between distance to
+   a differently-labelled building and confidence +0.42) and still not on val (about 0),
+   for every uncertainty method.
+8. **Label-noise candidates** are over-represented among the least confident 10% on
+   val-tiles (about 22% of them, where 10% would be chance) and barely on val (10-15%).
+9. **Per disaster, val-tiles remains uneven:** mexico-earthquake 0.995 accuracy,
+   hurricane-matthew 0.513 (no-damage recall 0.02), hurricane-harvey 0.646.
 
 ## Decisions waiting for you
 
-1. **Run the rest?** `powershell -ExecutionPolicy Bypass -File scripts\finish_runs.ps1`
-   trains stack, then seeds 1 and 2 of the better architecture, runs MC dropout and
-   rebuilds the documents: roughly 1.5 hours. The script has not been executed, and the
-   lighter loader settings have not been through a full run; watch memory at the start.
-2. **What to do about the val gap** before spending GPU time on ensembles of a model that
-   does not transfer. Options, cheapest first: stronger colour and contrast augmentation;
-   per-image normalisation; a lower learning rate for the backbone; larger context
-   around buildings for floods. My recommendation: try the augmentation first, and judge
-   it on val, not val-tiles.
-3. **Early stopping on val-tiles picks epoch 8, but val is flat or worse after epoch 4.**
-   val-tiles rewards fitting the training disasters. Do you want to keep selecting on
-   val-tiles (as decided in `docs/split_decision.md`), or select on val and accept that
-   val then stops being a clean estimate?
-4. **Batch size.** You asked for the largest batch that fits 8 GB. The probe found 512 at
-   4.2 GB; 1024 does not fit. I also cap at 512 by default, because a larger batch means
-   too few update steps in 10 epochs. Say if you want the cap removed.
-5. **Stack model's first layer.** You asked for the pretrained weights copied into both
-   halves. I copy them and multiply by 0.5, so the layer's output keeps its original
-   scale. Remove the 0.5 in `_six_channel_conv` if you want the plain copy.
-6. **`outputs/demo/` is now tracked in git** (the rest of `outputs/` is still ignored), so
-   the README and `docs/demo.md` can show the figures on GitHub. Other figures are in
-   `docs/figures/`. 1.8 MB in total.
-7. **Demo tiles.** val has only two disasters, so the six tiles are those two plus four
-   val-tiles tiles (harvey, matthew, palu, socal). They were picked from the labels, not
-   by model performance; the Florence tile is 27% correct and is shown as it is.
+1. **How to compare anything on val from here.** With this much seed-to-seed spread, a
+   single run cannot show whether a change helps. Either every comparison gets 3 seeds
+   (about 1.5 hours per setting), or comparisons are made on val-tiles plus a more
+   stable val measure. My recommendation: 3 seeds per setting, and report mean and
+   spread.
+2. **Was choosing `stack_aug` as the base right?** The rule I applied was "higher val
+   macro-F1" (0.308 against 0.297), which is inside the noise; val accuracy went the
+   other way (0.613 against 0.676). A plain-stack ensemble was not trained, so the two
+   were never compared on equal terms.
+3. **Selection rule.** The mean of val-tiles and val macro-F1 kept epoch 4 for two of the
+   four runs trained under it, at a spike in val. It does what you asked, but it partly selects on noise.
+   Averaging the score over neighbouring epochs, or keeping the last epoch of a full
+   cosine schedule, would be steadier. Your call.
+4. **MC dropout.** To make it a real comparison, dropout would have to go inside the
+   backbone, which changes training. Drop the method, or do that?
+5. **The val gap itself.** Augmentation did not close it. Next candidates: per-image
+   normalisation, matching post-image colours to the pre image, more context around
+   buildings, or accepting that two flood disasters are too different from the training
+   set and saying so. I have not tried any of these.
+6. **When to open the test set.** Not yet, in my view: the comparisons above are not
+   settled, and each look at test is final.
+7. Still open from session 1: the batch cap at 512; the 0.5 factor on the stack model's
+   copied first-layer weights; `outputs/demo/` tracked in git.
+
+## Changes to what you specified
+
+- The shift in the strong augmentation is +-4 px in the 128 px crop, which is about +-2 px
+  in the original tile for a typical building.
+- "Strong" colour jitter is: brightness, contrast and saturation +-30%, and a +-10% colour
+  cast per channel. You gave no numbers; these are mine.
+- MC-dropout passes use the single model's temperature, and the ensemble gets its own, so
+  the methods are compared on equal terms.
+- `scripts/finish_runs.ps1` from session 1 was removed; it was never run and is replaced
+  by the commands in the README.
 
 ## Problems hit
 
-- Batch-size probe stalled the first launch (it tried batches larger than the GPU;
-  fixed, about 8 minutes lost).
-- Memory pressure stopped the queue (see above and `BLOCKERS.md`).
-- GPU reserved memory peaked at the full 8.0 GB during the run (5.0 GB actually in use;
-  the rest is cuDNN trying out convolution algorithms). It did not crash, but there is no
-  headroom at batch 512 for the siamese model.
-
-The report of the earlier data-quality session is in git history (`08e2cb1`).
+- Session 1: batch-size probe stall, then the memory shortage (`BLOCKERS.md`, both
+  resolved).
+- Session 2: none during training. One generated sentence in `docs/results.md` first
+  read "the stronger augmentation helps on val" for a +0.011 change; I rewrote the
+  wording before committing.
