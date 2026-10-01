@@ -9,7 +9,7 @@ pytest.importorskip("torchvision")
 
 from conftest import write_fake_cache  # noqa: E402
 from src.train import (Config, class_weights, lr_factor, parse_config, run,  # noqa: E402
-                       selection_score)
+                       selection_score, smoothed_score)
 
 
 def test_class_weights_are_inverse_sqrt_frequency():
@@ -50,11 +50,14 @@ def test_training_run_end_to_end_on_a_tiny_cache(tmp_path, arch):
                  batch_size=8, eval_batch_size=8, pretrained=False, num_workers=0, amp=False)
     summary = run(cfg)
     out = tmp_path / "runs" / f"{arch}_s0"
-    assert summary["selected_on"] == "mean" and 1 <= summary["best_epoch"] <= 2
-    # the kept epoch is the one with the highest mean of val-tiles and val macro-F1
+    assert summary["selected_on"] == "mean"
+    # Selection: mean of val-tiles and val macro-F1, averaged over a 3-epoch window. The
+    # run has only 2 epochs, so the window shrinks to 2 and only epoch 2 can be kept.
     scores = [(h["val-tiles"]["macro_f1"] + h["val"]["macro_f1"]) / 2 for h in summary["history"]]
-    assert summary["best_epoch"] == scores.index(max(scores)) + 1
-    assert summary["best_selection_score"] == pytest.approx(max(scores))
+    assert [h["selection_score"] for h in summary["history"]] == pytest.approx(scores)
+    assert summary["history"][0]["smoothed_score"] is None
+    assert summary["best_epoch"] == 2
+    assert summary["best_selection_score"] == pytest.approx(sum(scores) / 2)
     # RAM (and, on a GPU, GPU memory) is logged every epoch
     for h in summary["history"]:
         assert h["memory"]["ram_used_gb"] > 0 and h["memory"]["run_private_gb"] > 0
@@ -77,6 +80,42 @@ def test_selection_score_rules():
     assert selection_score(row, "mean") == pytest.approx(0.5)
     assert selection_score(row, "val-tiles") == 0.7
     assert selection_score(row, "val") == 0.3
+
+
+def test_smoothed_score_needs_a_full_window():
+    scores = [0.40, 0.50, 0.30, 0.60]
+    assert smoothed_score(scores[:1], 3, 10) is None
+    assert smoothed_score(scores[:2], 3, 10) is None
+    assert smoothed_score(scores[:3], 3, 10) == pytest.approx(0.40)
+    assert smoothed_score(scores, 3, 10) == pytest.approx((0.5 + 0.3 + 0.6) / 3)
+    # a run shorter than the window: the window shrinks to the run length
+    assert smoothed_score([0.4], 3, 1) == pytest.approx(0.4)
+    assert smoothed_score([0.4, 0.6], 3, 2) == pytest.approx(0.5)
+
+
+def test_a_single_spike_does_not_win_under_the_window(tmp_path, monkeypatch):
+    # Fake the per-epoch scores: epoch 2 is a spike, epochs 4-6 are steadily good.
+    import src.train as train
+    fake = iter([0.30, 0.90, 0.30, 0.60, 0.62, 0.61])
+    monkeypatch.setattr(train, "selection_score", lambda row, select_on: next(fake))
+    cache = write_fake_cache(tmp_path / "cache", n=24)
+    summary = run(Config(cache_dir=str(cache), runs_dir=str(tmp_path / "runs"), epochs=6,
+                         patience=6, batch_size=8, eval_batch_size=8, pretrained=False,
+                         num_workers=0, amp=False))
+    assert summary["best_epoch"] == 6                     # last epoch of the best stretch
+    assert summary["best_selection_score"] == pytest.approx((0.60 + 0.62 + 0.61) / 3)
+
+
+def test_preprocessing_options_reach_the_datasets_and_the_run_name(tmp_path):
+    cache = write_fake_cache(tmp_path / "cache", n=24)
+    cfg = Config(arch="stack", augment="strong", normalize="per_image", match_hist=True,
+                 cache_dir=str(cache), runs_dir=str(tmp_path / "runs"), epochs=1, batch_size=8,
+                 eval_batch_size=8, pretrained=False, num_workers=0, amp=False)
+    summary = run(cfg)
+    assert summary["run_name"] == "stack_aug_pernorm_histmatch_s0"
+    assert summary["normalize"] == "per_image" and summary["match_hist"] is True
+    saved = torch.load(tmp_path / "runs" / summary["run_name"] / "best.pt", weights_only=True)
+    assert saved["config"]["normalize"] == "per_image" and saved["config"]["match_hist"] is True
 
 
 def test_run_name_and_augmentation_follow_the_config(tmp_path):

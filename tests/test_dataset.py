@@ -4,7 +4,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from conftest import write_fake_cache  # noqa: E402
-from src.dataset import CropDataset, _shift, augment_pair, unnormalize  # noqa: E402
+from src.dataset import (CropDataset, _shift, augment_pair, match_histogram,  # noqa: E402
+                         normalize_image, unnormalize)
 from src.split import TestSplitError  # noqa: E402
 
 
@@ -108,6 +109,58 @@ def test_strong_jitter_changes_colours_more_than_base():
     strong = torch.stack([(augment_pair(img, img, "strong")[0].mean() - img.mean()).abs()
                           for _ in range(200)])
     assert strong.mean() > 2 * base.mean()
+
+
+def test_histogram_matching_gives_post_the_colours_of_pre():
+    torch.manual_seed(0)
+    pre = torch.rand(3, 64, 64) * 0.5 + 0.4            # bright
+    post = torch.rand(3, 64, 64) * 0.3                 # dark, different contrast
+    matched = match_histogram(post, pre)
+    assert matched.shape == post.shape
+    assert torch.allclose(matched.mean(dim=(1, 2)), pre.mean(dim=(1, 2)), atol=0.01)
+    assert torch.allclose(matched.flatten(1).quantile(0.9, dim=1),
+                          pre.flatten(1).quantile(0.9, dim=1), atol=0.02)
+    # only the colours change, not the picture: sorting the pixels by their old value
+    # also sorts them by their new value (ties allowed)
+    order_before = post[0].flatten().argsort()
+    assert (matched[0].flatten()[order_before].diff() >= -1e-6).all()
+
+
+def test_histogram_matching_an_image_to_itself_changes_nothing():
+    x = torch.rand(3, 32, 32)
+    assert torch.allclose(match_histogram(x, x), x, atol=1 / 255)
+
+
+def test_per_image_normalisation_removes_brightness_and_contrast():
+    torch.manual_seed(0)
+    x = torch.rand(3, 32, 32)
+    a = normalize_image(x, "per_image")
+    b = normalize_image(x * 0.5 + 0.2, "per_image")     # darker, flatter copy of the same image
+    assert torch.allclose(a, b, atol=1e-4)
+    assert torch.allclose(a.mean(dim=(1, 2)), torch.zeros(3), atol=1e-5)
+    assert torch.allclose(a.flatten(1).std(dim=1), torch.ones(3), atol=1e-2)
+    assert torch.isfinite(normalize_image(torch.zeros(3, 8, 8), "per_image")).all()   # blank crop
+    with pytest.raises(ValueError, match="normalisation"):
+        normalize_image(x, "zscore")
+
+
+def test_dataset_options_and_from_config(cache):
+    plain = CropDataset(cache, "val")
+    per = CropDataset(cache, "val", normalize="per_image")
+    hist = CropDataset(cache, "val", match_hist=True)
+    assert per[3][0].mean().abs() < 1e-4 and plain[3][0].mean().abs() > 1e-3
+    # histogram matching touches only the post image; the fake "destroyed" post crop
+    # (label 3) is a darkened copy of pre, so matching brings it back to pre's brightness
+    assert torch.equal(hist[3][0], plain[3][0])
+    assert hist[3][1].mean() > plain[3][1].mean()
+    assert torch.allclose(hist[3][1].mean(), hist[3][0].mean(), atol=0.05)
+    again = CropDataset.from_config({"cache_dir": str(cache), "normalize": "per_image",
+                                     "match_hist": True}, "val")
+    assert again.normalize == "per_image" and again.match_hist is True
+    old = CropDataset.from_config({"cache_dir": str(cache)}, "val")       # config of an old run
+    assert old.normalize == "imagenet" and old.match_hist is False
+    with pytest.raises(ValueError, match="normalisation"):
+        CropDataset(cache, "val", normalize="none")
 
 
 def test_unknown_augmentation_is_an_error(cache):

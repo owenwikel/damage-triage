@@ -1,0 +1,12 @@
+{
+  "arch": "stack",
+  "augment": "strong",
+  "normalize": "per_image",
+  "epochs": 10,
+  "patience": 3,
+  "lr": 0.0005,
+  "weight_decay": 0.01,
+  "dropout": 0.3,
+  "batch_size": 0,
+  "max_batch_size": 512
+}

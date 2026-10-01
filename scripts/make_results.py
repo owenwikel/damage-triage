@@ -1,19 +1,20 @@
 """Collect the training runs into docs/results.md and docs/figures/.
 
 Usage:
-    .\\.venv\\Scripts\\python.exe scripts\\make_results.py --base siamese_aug
+    .\\.venv\\Scripts\\python.exe scripts\\make_results.py
 
-Reads runs/<run>/metrics.json and the saved predictions; trains nothing and needs no GPU,
-so it can be re-run at any time. Sections whose runs are missing are skipped.
-Only val-tiles and val are ever read: the training runs never save test predictions, and
-CropDataset refuses to load the test part (src/split.py).
+Reads runs/<setting>_s<seed>/metrics.json and the saved predictions; trains nothing and
+needs no GPU, so it can be re-run at any time. Settings whose runs are missing are
+skipped. Only val-tiles and val are ever read: the training runs never save test
+predictions, and CropDataset refuses to load the test part (src/split.py).
 
-Run names: <arch>_s<seed> for the base augmentation, <arch>_aug_s<seed> for the strong
-augmentation. ``--base`` names the model the uncertainty sections are built on (without
-the seed suffix); by default it is chosen from the runs, see ``choose_base``.
+A "setting" is one way of training (architecture, augmentation, preprocessing); each
+setting is trained with several seeds, and the document reports the mean and the spread
+over seeds, because on val a single run is not a reliable measurement.
 
-Sections: baselines, sanity check, siamese vs stack, augmentation experiment,
-calibration, uncertainty methods, triage, table of all runs.
+Sections: baselines; settings compared (mean +- spread); does uncertainty flag failure
+on val; gap diagnosis (pointer); calibration and triage of the base model; MC dropout
+(set aside); earlier single-run comparisons; all runs.
 """
 
 import argparse
@@ -28,48 +29,58 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.calibrate import calibration_report, fit_temperature, plot_reliability  # noqa: E402
+from src.calibrate import calibration_report, plot_reliability  # noqa: E402
 from src.colors import INK, SURFACE  # noqa: E402
 from src.dataset import CLASS_NAMES, read_index  # noqa: E402
 from src.metrics import expected_calibration_error, summarize  # noqa: E402
 from src.reporting import df_to_markdown  # noqa: E402
 from src.triage import (BUDGETS, COVERAGES, METHOD_COLORS, at_coverage, aurc,  # noqa: E402
                         inspection_recall, plot_inspection, plot_risk_coverage)
-from src.uncertainty import collect_methods, method_scores  # noqa: E402
+from src.uncertainty import collect_methods  # noqa: E402
 
 PARTS = ["val-tiles", "val"]
 SHORT = ["no-dmg", "minor", "major", "destr."]
+# Settings in the order they are shown; the first one found is the base.
+SETTINGS = {
+    "stack_aug": "base: stack, strong augmentation",
+    "stack_aug_pernorm": "base + per-image normalisation",
+    "stack_aug_histmatch": "base + post colours histogram-matched to pre",
+}
+SINGLE, ENSEMBLE = "max prob (temp. scaled)", "ensemble"
 plt.rcParams.update({"figure.facecolor": SURFACE, "axes.facecolor": SURFACE,
                      "savefig.facecolor": SURFACE, "text.color": INK, "axes.labelcolor": INK,
                      "axes.edgecolor": "#898781", "xtick.color": INK, "ytick.color": INK,
                      "font.size": 9, "axes.spines.top": False, "axes.spines.right": False})
 
-
-def mean_score(h):
-    """The selection score: mean of the val-tiles and val macro-F1 of one epoch."""
-    return (h["val-tiles"]["macro_f1"] + h["val"]["macro_f1"]) / 2
+# Recorded results of work that is no longer re-run (runs made on 2026-10-01 under the
+# earlier, single-epoch selection rule; their folders are not in git).
+MC_DROPOUT_RECORD = [
+    # split, method, accuracy, macro-F1, ECE, AURC, accuracy at 80% / 50% coverage
+    ("val-tiles", "max prob (temp. scaled)", 0.8697, 0.6933, 0.0154, 0.0238, 0.958, 0.993),
+    ("val-tiles", "MC dropout (mean max prob)", 0.8695, 0.6930, 0.0156, 0.0240, 0.958, 0.993),
+    ("val-tiles", "MC dropout (entropy)", 0.8695, 0.6930, 0.0160, 0.0244, 0.956, 0.993),
+    ("val", "max prob (temp. scaled)", 0.6133, 0.3079, 0.0426, 0.2022, 0.676, 0.795),
+    ("val", "MC dropout (mean max prob)", 0.6143, 0.3085, 0.0423, 0.2017, 0.677, 0.796),
+    ("val", "MC dropout (entropy)", 0.6143, 0.3085, 0.0405, 0.2021, 0.670, 0.793),
+]
+EARLIER_RUNS_RECORD = [
+    # run, what, epoch kept, val-tiles acc, val-tiles F1, val acc, val F1
+    ("siamese_s0", "siamese, base augmentation", "10", 0.880, 0.704, 0.483, 0.256),
+    ("stack_s0", "stack, base augmentation", "4 of 7", 0.871, 0.685, 0.676, 0.297),
+    ("stack_aug_s0", "stack, strong augmentation", "9 of 10", 0.870, 0.693, 0.613, 0.308),
+    ("stack_aug_s1", "same, seed 1", "9 of 10", 0.870, 0.693, 0.657, 0.310),
+    ("stack_aug_s2", "same, seed 2", "4 of 7", 0.862, 0.669, 0.761, 0.337),
+    ("ensemble of those 3", "probabilities averaged", "", 0.875, 0.700, 0.709, 0.331),
+]
 
 
 def load_run(run_dir):
-    """metrics.json plus predictions of one finished run, or None.
-
-    Adds ``rule_epoch`` / ``rule`` / ``rule_score``: the epoch the current selection rule
-    (mean of val-tiles and val macro-F1) picks, and that epoch's metrics from the
-    per-epoch log. For runs trained under this rule that is simply the saved best epoch.
-    ``saved_matches_rule`` is False for the first run, which kept its weights by
-    val-tiles macro-F1 alone.
-    """
+    """metrics.json of one finished run (None if it has not finished)."""
     run_dir = Path(run_dir)
     if not (run_dir / "metrics.json").exists() or not (run_dir / "preds_val.npz").exists():
         return None
     run = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     run["dir"] = run_dir
-    run["preds"] = {p: dict(np.load(run_dir / f"preds_{p}.npz")) for p in PARTS}
-    scores = [mean_score(h) for h in run["history"]]
-    run["rule_epoch"] = int(np.argmax(scores)) + 1
-    run["rule"] = run["history"][run["rule_epoch"] - 1]
-    run["rule_score"] = float(max(scores))
-    run["saved_matches_rule"] = run["rule_epoch"] == run["best_epoch"]
     return run
 
 
@@ -81,40 +92,53 @@ def metric_row(m):
     return row
 
 
-def comparison_rows(runs):
-    return pd.DataFrame([{"model": r["run_name"], "split": part, **metric_row(r["rule"][part])}
-                         for r in runs for part in PARTS])
+def spread(values, digits=3):
+    """'mean +- standard deviation (min-max)' of a handful of per-seed numbers.
 
-
-def cost_rows(runs):
-    rows = []
-    for r in runs:
-        rows.append({
-            "run": r["run_name"], "epoch kept": r["rule_epoch"], "epochs run": r["epochs_run"],
-            "loader workers": r.get("num_workers", 8),
-            "train s/epoch": int(round(r["train_seconds_per_epoch"])),
-            "s/epoch incl. eval": int(round(r["seconds_per_epoch"])),
-            "RAM used, peak GB (whole machine)": r.get("ram_peak_used_gb", np.nan),
-            "RAM of this run, peak GB": r.get("run_peak_private_gb", np.nan),
-            "GPU peak GB (allocated / reserved)":
-                (f"{r['gpu_peak_allocated_gb']:.1f} / {r['gpu_peak_reserved_gb']:.1f}"
-                 if r['gpu_peak_allocated_gb'] is not None else "no GPU"),
-        })
-    return pd.DataFrame(rows)
-
-
-def choose_base(plain, aug):
-    """The model the rest of the document is built on.
-
-    The augmentation experiment is judged on val macro-F1 (the unseen disasters), which
-    is the gap it was meant to close.
+    The standard deviation uses n - 1 (it estimates the spread of seeds in general from
+    the few we have). With 3 seeds it is itself a rough number: read it as "about this
+    much", not to the last digit.
     """
-    if aug is None:
-        return plain
-    return aug if aug["rule"]["val"]["macro_f1"] > plain["rule"]["val"]["macro_f1"] else plain
+    v = np.asarray(values, dtype=float)
+    if len(v) == 1:
+        return f"{v[0]:.{digits}f} (1 seed)"
+    return f"{v.mean():.{digits}f} ± {v.std(ddof=1):.{digits}f} ({v.min():.{digits}f}-{v.max():.{digits}f})"
 
 
-# ---- 1. baselines --------------------------------------------------------------------
+def auroc(confidence, correct):
+    """Probability that a randomly chosen correct prediction has a higher confidence than
+    a randomly chosen wrong one. 0.5 = confidence says nothing about being right;
+    1.0 = every correct prediction outranks every mistake. Computed from ranks
+    (the Mann-Whitney statistic), ties counting half."""
+    correct = np.asarray(correct, dtype=bool)
+    n_pos, n_neg = correct.sum(), (~correct).sum()
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = pd.Series(np.asarray(confidence, dtype=float)).rank().to_numpy()
+    return float((ranks[correct].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def errors_caught(confidence, correct, share):
+    """Share of all mistakes that sit among the least-confident ``share`` of predictions.
+
+    If confidence were unrelated to being right, the least-confident 20% would contain
+    20% of the mistakes. The closer to 100%, the better confidence flags failure.
+    """
+    confidence, wrong = np.asarray(confidence, dtype=float), ~np.asarray(correct, dtype=bool)
+    k = max(1, int(round(share * len(confidence))))
+    lowest = np.argsort(confidence, kind="stable")[:k]
+    return float(wrong[lowest].sum() / max(wrong.sum(), 1))
+
+
+def flag_stats(method, y):
+    right = method["pred"] == y
+    return {"accuracy": float(right.mean()), "mean confidence": float(np.mean(method["confidence"])),
+            "AUROC": auroc(method["confidence"], right),
+            "errors in least-confident 20%": errors_caught(method["confidence"], right, 0.20),
+            "errors in least-confident 50%": errors_caught(method["confidence"], right, 0.50)}
+
+
+# ---- baselines -----------------------------------------------------------------------
 
 def baselines(labels_by_part, train_labels, draws=200, seed=0):
     """Majority class and frequency-weighted random guessing.
@@ -137,13 +161,13 @@ def baselines(labels_by_part, train_labels, draws=200, seed=0):
 
 # ---- figures -------------------------------------------------------------------------
 
-def plot_confusions(runs, path):
-    """Row-normalised confusion matrices: one row of panels per run, one column per split."""
-    fig, axes = plt.subplots(len(runs), len(PARTS), figsize=(4.3 * len(PARTS), 3.9 * len(runs)),
+def plot_confusions(panels, labels, path):
+    """Row-normalised confusion matrices. ``panels`` = [(title, {part: predictions})]."""
+    fig, axes = plt.subplots(len(panels), len(PARTS), figsize=(4.3 * len(PARTS), 3.9 * len(panels)),
                              squeeze=False)
-    for i, run in enumerate(runs):
+    for i, (title, preds) in enumerate(panels):
         for j, part in enumerate(PARTS):
-            cm = np.array(run["rule"][part]["confusion"], dtype=float)
+            cm = np.array(summarize(labels[part], preds[part])["confusion"], dtype=float)
             share = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
             ax = axes[i, j]
             ax.imshow(share, cmap="Blues", vmin=0, vmax=1)
@@ -156,7 +180,7 @@ def plot_confusions(runs, path):
             ax.set_yticks(range(4), SHORT)
             ax.set_xlabel("predicted")
             ax.set_ylabel("true")
-            ax.set_title(f"{run['run_name']} on {part}\n(each row sums to 100%)", fontsize=10)
+            ax.set_title(f"{title} on {part}\n(each row sums to 100%)", fontsize=10)
             for s in ax.spines.values():
                 s.set_visible(False)
     fig.tight_layout()
@@ -164,22 +188,9 @@ def plot_confusions(runs, path):
     plt.close(fig)
 
 
-def plot_reliability_grid(run, temperature, path):
-    fig, axes = plt.subplots(2, 2, figsize=(8.6, 7.6))
-    for j, part in enumerate(PARTS):
-        logits, labels = run["preds"][part]["logits"], run["preds"][part]["labels"]
-        for i, (name, t) in enumerate((("before", 1.0), (f"after (T = {temperature:.2f})", temperature))):
-            m = method_scores(logits, labels, temperature=t)["max prob (temp. scaled)"]
-            plot_reliability(axes[i, j], m["confidence"], m["pred"] == labels, f"{part}, {name}")
-    axes[0, 0].legend(fontsize=7.5, frameon=False, loc="upper left")
-    fig.tight_layout()
-    fig.savefig(path, dpi=130)
-    plt.close(fig)
-
-
 def plot_reliability_methods(methods, labels, path):
     """One reliability diagram per method (columns) and split (rows)."""
-    names = [n for n in methods["val"] if n != "MC dropout (entropy)"]   # not a probability
+    names = list(methods["val"])
     fig, axes = plt.subplots(2, len(names), figsize=(3.5 * len(names), 6.6), squeeze=False)
     for i, part in enumerate(PARTS):
         for j, name in enumerate(names):
@@ -188,6 +199,32 @@ def plot_reliability_methods(methods, labels, path):
                              f"{part}\n{name}", color=METHOD_COLORS[j % len(METHOD_COLORS)])
             if j:
                 axes[i, j].set_ylabel("")
+    axes[0, 0].legend(fontsize=7, frameon=False, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def plot_confidence_histograms(single, ensemble, labels, path):
+    """Where do right and wrong predictions sit on the confidence axis?"""
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 6.4), sharex=True)
+    bins = np.linspace(0.25, 1.0, 31)
+    for i, (name, methods) in enumerate((("single model (seed 0)", single), ("ensemble", ensemble))):
+        for j, part in enumerate(PARTS):
+            m = methods[part]
+            right = m["pred"] == labels[part]
+            ax = axes[i, j]
+            ax.hist(m["confidence"][right], bins=bins, color="#2a78d6", alpha=0.75,
+                    label=f"correct ({right.mean():.0%})")
+            ax.hist(m["confidence"][~right], bins=bins, color="#e34948", alpha=0.75,
+                    label=f"wrong ({(~right).mean():.0%})")
+            ax.set_title(f"{name} on {part}", fontsize=10)
+            ax.set_ylabel("buildings")
+            ax.legend(fontsize=8, frameon=False, loc="upper left")
+            ax.grid(color="#e1e0d9", linewidth=0.6)
+            ax.set_axisbelow(True)
+    for ax in axes[1]:
+        ax.set_xlabel("confidence")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
@@ -200,9 +237,6 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs-dir", type=Path, default=Path("runs"))
     ap.add_argument("--cache-dir", type=Path, default=Path(r"C:\Users\wikel\dev\xbd-data\crops"))
-    ap.add_argument("--archs", nargs="+", default=["siamese", "stack"])
-    ap.add_argument("--base", default=None,
-                    help="run name without the seed suffix, e.g. siamese_aug (default: chosen)")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     ap.add_argument("--out", type=Path, default=Path("docs/results.md"))
     ap.add_argument("--fig-dir", type=Path, default=Path("docs/figures"))
@@ -213,6 +247,21 @@ def main():
     index = read_index(args.cache_dir)
     labels = {p: index[index["part"] == p].sort_values("row")["label"].to_numpy() for p in PARTS}
     train_labels = index[index["part"] == "train"]["label"].to_numpy()
+
+    # Every setting: its finished seeds, and every confidence method built from them.
+    settings = {}
+    for name, what in SETTINGS.items():
+        runs = [load_run(args.runs_dir / f"{name}_s{s}") for s in args.seeds]
+        runs = [r for r in runs if r]
+        if not runs:
+            continue
+        dirs = [r["dir"] for r in runs]
+        per_seed = [collect_methods(d, [])[0] for d in dirs]            # each model alone
+        together, info = collect_methods(dirs[0], dirs)                  # seed 0 + the ensemble
+        ens_key = next((k for k in together["val"] if k.startswith("ensemble") and "scaled" in k), None)
+        settings[name] = {"what": what, "runs": runs, "per_seed": per_seed,
+                          "together": together, "info": info, "ens_key": ens_key}
+    base_name = next(iter(settings), None)
 
     L = ["# Results (validation only)\n",
          "Generated by `scripts/make_results.py` from `runs/`. **Every number here is on "
@@ -227,17 +276,22 @@ def main():
          f"destroyed buildings ({int((labels['val'] == 1).sum())} and "
          f"{int((labels['val'] == 3).sum())}), so its per-class numbers for those two "
          "classes are noisy.\n",
-         "> **val is now used for model selection.** The epoch whose weights are kept is "
-         "the one with the highest *mean of the val-tiles and val macro-F1*, and the "
-         "architecture and augmentation choices below were judged on val. val scores are "
-         "therefore no longer an untouched estimate for a new disaster: they are somewhat "
-         "optimistic. The only untouched data is the test set.\n",
+         "> **val is used for model selection.** The checkpoint that is kept is the last "
+         "epoch of the best 3-epoch stretch of the *mean of the val-tiles and val "
+         "macro-F1* (`smoothed_score` in `src/train.py`), and the settings below were "
+         "compared on val. val scores are therefore not an untouched estimate for a new "
+         "disaster: they are somewhat optimistic. The only untouched data is the test "
+         "set.\n",
          "Un-classified buildings are dropped (`docs/data_decisions.md`). Recall of a class "
          "= share of its buildings that were predicted as that class. Macro-F1 = plain "
-         "average of the four per-class F1 scores.\n"]
+         "average of the four per-class F1 scores. **'a ± b (c-d)'** = mean, standard "
+         "deviation and range over the seeds of a setting; with 3 seeds the standard "
+         "deviation is itself rough.\n"]
 
     # 1. baselines
     base_tbl, freq = baselines(labels, train_labels)
+    majority = {p: base_tbl[(base_tbl["split"] == p)
+                            & base_tbl["baseline"].str.startswith("majority")].iloc[0] for p in PARTS}
     L += ["## 1. Baselines\n",
           "What you get without looking at any image. Class shares in train: "
           + ", ".join(f"{n} {f:.1%}" for n, f in zip(CLASS_NAMES, freq)) + ".\n",
@@ -245,345 +299,335 @@ def main():
           "Majority-class accuracy is high because most buildings are undamaged; its "
           "macro-F1 shows it is useless. A model has to beat **both** numbers.\n"]
 
-    def versus_baseline(run):
-        out = []
-        for part in PARTS:
-            maj = base_tbl[(base_tbl["split"] == part)
-                           & base_tbl["baseline"].str.startswith("majority")].iloc[0]
-            m = run["rule"][part]
-            verdict = "above" if m["accuracy"] > maj["accuracy"] else "**below**"
-            out.append(f"- On **{part}**, `{run['run_name']}` has accuracy {m['accuracy']:.3f}, "
-                       f"{verdict} the majority-class baseline ({maj['accuracy']:.3f}), and "
-                       f"macro-F1 {m['macro_f1']:.3f} against the baselines' "
-                       f"{base_tbl[base_tbl['split'] == part]['macro-F1'].max():.3f}.")
-        return out
+    if not settings:
+        args.out.write_text("\n".join(L), encoding="utf-8")
+        print(f"Wrote {args.out} (no finished runs)")
+        return
 
-    # 2. sanity check
-    sanity = args.runs_dir / "sanity_overfit" / "metrics.json"
-    if sanity.exists():
-        s = json.loads(sanity.read_text(encoding="utf-8"))
-        m = s["best"]["overfit-subset"]
-        L += ["## 2. Sanity check: overfit 256 crops\n",
-              f"Before any real training, the siamese model was trained on {m['n']} training "
-              "crops only (no augmentation) to check that the pipeline can learn at all: "
-              f"**{m['accuracy']:.1%} accuracy on those crops after {s['epochs_run']} epochs** "
-              f"(training loss {s['history'][0]['train_loss']:.2f} -> "
-              f"{s['history'][-1]['train_loss']:.3f}). So labels, gradients and learning "
-              "rate are wired up correctly; it says nothing yet about generalisation.\n"]
-
-    # 3. architectures
-    archs = {a: load_run(args.runs_dir / f"{a}_s0") for a in args.archs}
-    archs = {a: r for a, r in archs.items() if r}
-    better = base = None
-    if archs:
-        better = max(archs, key=lambda a: archs[a]["rule_score"])
-        plot_confusions(list(archs.values()), args.fig_dir / "confusion_matrices.png")
-        L += ["## 3. Siamese vs stack\n",
-              "Same data, loss, optimiser, schedule, augmentation and seed (0); only the "
-              "architecture differs (`src/model.py`). Each row is the epoch with the highest "
-              "mean of val-tiles and val macro-F1.\n",
-              df_to_markdown(comparison_rows(archs.values()), float_fmt="{:.3f}", index=False) + "\n"]
-        for r in archs.values():
-            if not r["saved_matches_rule"]:
-                L.append(f"*`{r['run_name']}` was trained before the selection rule changed: its "
-                         f"saved weights are from epoch {r['best_epoch']} (best val-tiles "
-                         f"macro-F1), while the row above is epoch {r['rule_epoch']}, taken "
-                         "from its per-epoch log. The comparison is therefore like for like, "
-                         "but those epoch-{0} weights no longer exist.*\n".format(r["rule_epoch"]))
-        L += [df_to_markdown(cost_rows(archs.values()), float_fmt="{:.1f}", index=False) + "\n"]
-        if len(archs) > 1:
-            other = [a for a in archs if a != better][0]
-            b, o = archs[better], archs[other]
-            L.append(f"**Better by the selection score: `{better}`** (mean macro-F1 "
-                     f"{b['rule_score']:.3f} against {o['rule_score']:.3f}; val-tiles "
-                     f"{b['rule']['val-tiles']['macro_f1']:.3f} vs "
-                     f"{o['rule']['val-tiles']['macro_f1']:.3f}, val "
-                     f"{b['rule']['val']['macro_f1']:.3f} vs {o['rule']['val']['macro_f1']:.3f}). "
-                     "One seed per architecture: a difference of a point or two is within "
-                     "what another seed could produce (see the ensemble members in section "
-                     "6).\n")
-        else:
-            missing = [a for a in args.archs if a not in archs]
-            L.append(f"**Not trained: {', '.join(f'`{a}`' for a in missing)}** (see "
-                     "`BLOCKERS.md`).\n")
-        L += versus_baseline(archs[better])
-        L += [f"\n![confusion matrices]({fig_rel}/confusion_matrices.png)\n"]
-
-        # 4. augmentation experiment
-        plain = archs[better]
-        aug = load_run(args.runs_dir / f"{better}_aug_s0")
-        base = load_run(args.runs_dir / f"{args.base}_s0") if args.base else choose_base(plain, aug)
-        if aug:
-            d_val = aug["rule"]["val"]["macro_f1"] - plain["rule"]["val"]["macro_f1"]
-            d_vt = aug["rule"]["val-tiles"]["macro_f1"] - plain["rule"]["val-tiles"]["macro_f1"]
-            d_acc = aug["rule"]["val"]["accuracy"] - plain["rule"]["val"]["accuracy"]
-            plot_confusions([plain, aug], args.fig_dir / "confusion_augmentation.png")
-            L += ["## 4. Augmentation experiment for the val gap\n",
-                  f"One extra run of `{better}` with the \"strong\" augmentation "
-                  "(`augment_pair` in `src/dataset.py`): brightness, contrast and saturation "
-                  "within +-30% and a +-10% colour cast, drawn independently for pre and "
-                  "post, plus a random shift of the post image against the pre image by up "
-                  "to 4 px each way (in the 128 px crop; about 2 px in the original tile for "
-                  "a typical building). Everything else is unchanged. The original uses "
-                  "+-10% brightness and contrast and no shift.\n",
-                  df_to_markdown(comparison_rows([plain, aug]), float_fmt="{:.3f}", index=False) + "\n",
-                  f"**Judged on val (the unseen disasters): macro-F1 {d_val:+.3f}, accuracy "
-                  f"{d_acc:+.3f}; on val-tiles macro-F1 {d_vt:+.3f}.** "
-                  + ("A mixed result: the two val metrics move in opposite directions. "
-                     if d_val * d_acc < 0 and abs(d_acc) > 0.02 else
-                     "The stronger augmentation helps on val. " if d_val > 0.01 else
-                     "The stronger augmentation does not help on val. " if d_val < -0.01 else
-                     "On val the two are within a point of each other. ")
-                  + "This is a single run per setting, and val macro-F1 moves by several "
-                  "points from one epoch to the next within a run (tables below), so a "
-                  "difference of this size is not evidence either way. What the experiment "
-                  "does show: this augmentation alone does not close the gap to val-tiles.\n"]
-            L += versus_baseline(aug)
-            L += [f"\n![confusion matrices, original vs strong augmentation]({fig_rel}/confusion_augmentation.png)\n",
-                  df_to_markdown(cost_rows([aug]), float_fmt="{:.1f}", index=False) + "\n"]
-        L += [f"**Base model for the rest of this document: `{base['run_name'][:-3]}`**"
-              + (" (chosen by hand with `--base`)." if args.base else
-                 " (the one with the higher val macro-F1 of the two above)." if aug else ".")
-              + "\n"]
-        for r in dict.fromkeys([plain["run_name"], *( [aug["run_name"]] if aug else [])]):
-            run_ = plain if r == plain["run_name"] else aug
-            epochs = pd.DataFrame([{
-                "epoch": h["epoch"], "train loss": h["train_loss"], "train acc": h["train_acc"],
-                **{f"{p} {k}": h[p][v] for p in PARTS
-                   for k, v in (("acc", "accuracy"), ("macro-F1", "macro_f1"))},
-                "selection score": mean_score(h),
-                "RAM free GB": (f"{h['memory']['ram_available_gb']:.0f}" if "memory" in h else ""),
-            } for h in run_["history"]])
-            L += [f"Per epoch, `{r}` (kept: epoch **{run_['rule_epoch']}**):\n",
-                  df_to_markdown(epochs, float_fmt="{:.3f}", index=False) + "\n"]
-        L.append("Per-class recall and memory for every epoch are in `runs/<run>/log.jsonl` "
-                 "(not in git).\n")
-
-    # 5-7 need the base model's seed-0 run
-    if base:
-        base_name = base["run_name"][:-3]
-        if not base["saved_matches_rule"]:
-            L.append(f"*Note: the saved weights of `{base['run_name']}` are from epoch "
-                     f"{base['best_epoch']}, not the rule's epoch {base['rule_epoch']}; the "
-                     "sections below use the saved weights.*\n")
-        run = base
-        temperature = fit_temperature(run["preds"]["val-tiles"]["logits"],
-                                      run["preds"]["val-tiles"]["labels"])
-        cal = []
-        for part in PARTS:
-            rep = calibration_report(run["preds"][part]["logits"], run["preds"][part]["labels"],
-                                     temperature)
-            for when in ("before", "after"):
-                cal.append({"split": part, "temperature scaling": when,
-                            "ECE": rep[when]["ece"], "NLL": rep[when]["nll"],
-                            "mean confidence": rep[when]["mean_confidence"],
-                            "accuracy": rep[when]["accuracy"]})
-        plot_reliability_grid(run, temperature, args.fig_dir / "reliability.png")
-        L += [f"## 5. Calibration (`{run['run_name']}`)\n",
-              f"Temperature scaling (`src/calibrate.py`): one number T divides the logits. "
-              f"Fitted on val-tiles: **T = {temperature:.3f}** "
-              + ("(above 1: the model was over-confident and is made less sure)."
-                 if temperature > 1 else "(below 1: the model was under-confident).")
-              + " ECE = average gap between confidence and accuracy (15 bins); NLL = negative "
-              "log-likelihood. Accuracy cannot change, because dividing by T never changes "
-              "the top class.\n",
-              df_to_markdown(pd.DataFrame(cal), float_fmt="{:.4f}", index=False) + "\n",
-              f"![reliability diagrams]({fig_rel}/reliability.png)\n",
-              "T was fitted on val-tiles, so the val-tiles 'after' number is the best case. "
-              "The val rows show how well that one T carries over to unseen disasters.\n"]
-
-        # 6. uncertainty methods
-        seeds = [load_run(args.runs_dir / f"{base_name}_s{s}") for s in args.seeds]
-        seeds = [r for r in seeds if r]
-        # All methods, built from the saved predictions. The ensemble gets its own
-        # temperature: log(mean probability) is treated as its logits and one T is
-        # fitted on val-tiles, exactly as for a single model.
-        methods, info = collect_methods(run["dir"], [r["dir"] for r in seeds])
-        ens_t = info["ensemble_temperature"]
-        rows = []
-        for part in PARTS:
-            y = labels[part]
-            for name, m in methods[part].items():
-                s = summarize(y, m["pred"])
-                top = m["probs"].max(axis=1)     # ECE needs a probability, not e.g. -entropy
-                rows.append({"split": part, "method": name, "accuracy": s["accuracy"],
-                             "macro-F1": s["macro_f1"],
-                             "ECE": expected_calibration_error(
-                                 m["confidence"] if m["confidence"].min() >= 0 else top,
-                                 m["pred"] == y),
-                             "AURC": aurc(m["confidence"], m["pred"] == y)})
-        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8))
-        for ax, part in zip(axes, PARTS):
-            plot_risk_coverage(ax, methods[part], labels[part], f"Risk-coverage on {part}")
-        fig.tight_layout()
-        fig.savefig(args.fig_dir / "risk_coverage.png", dpi=130)
-        plt.close(fig)
-        plot_reliability_methods(methods, labels, args.fig_dir / "reliability_methods.png")
-        have = list(methods["val"])
-        has_mc, has_ens = any("MC" in h for h in have), len(seeds) > 1
-        mc_t = None
-        mc_meta = run["dir"] / "mc_dropout.json"
-        if mc_meta.exists():
-            mc_t = json.loads(mc_meta.read_text(encoding="utf-8")).get("temperature")
-        L += [f"## 6. Uncertainty methods (`{base_name}`)\n",
-              "Each method gives every prediction a confidence (`src/uncertainty.py`):\n",
-              "- **max prob**: the top softmax probability of the seed-0 model, raw and after "
-              "temperature scaling;",
-              "- **MC dropout**: 20 passes of the seed-0 model with dropout left on"
-              + (f", each pass temperature-scaled with the same T ({mc_t:.3f})" if mc_t else "")
-              + "; confidence = mean of the passes' top probabilities, or minus the entropy "
-              "of the averaged probabilities" + ("" if has_mc else " *(not run)*") + ";",
-              "- **ensemble**: probabilities averaged over models trained with different "
-              "seeds " + (f"({', '.join(r['run_name'] for r in seeds)}), raw and with its own "
-                          f"temperature (T = {ens_t:.3f}, fitted on val-tiles)" if has_ens else
-                          f"*(not available: only {seeds[0]['run_name']} has been trained)*")
-              + ".\n",
-              ("" if has_mc and has_ens else
-               "**Some methods are missing in this version; see `BLOCKERS.md`.**\n"),
-              "ECE: lower = confidence closer to accuracy. AURC (area under the "
-              "risk-coverage curve): lower = mistakes are ranked lower, and/or fewer "
-              "mistakes. For the entropy row, ECE is computed on the top averaged "
-              "probability, because minus-entropy is not a probability. MC dropout and the "
-              "ensemble also change the predictions, so their accuracy can differ from the "
-              "single model's.\n",
-              df_to_markdown(pd.DataFrame(rows), float_fmt="{:.4f}", index=False) + "\n",
-              f"![risk-coverage curves]({fig_rel}/risk_coverage.png)\n",
-              f"![reliability per method]({fig_rel}/reliability_methods.png)\n"]
-        if has_ens:
-            # Each member on its own (temperature-scaled max prob), next to the ensemble,
-            # so the ensemble is compared with all of its members and not only seed 0.
-            per_seed = []
-            for r in seeds:
-                own, _ = collect_methods(r["dir"], [])
-                row = {"model": r["run_name"], "epoch kept": r["best_epoch"]}
-                for p in PARTS:
-                    m = own[p]["max prob (temp. scaled)"]
-                    cov = at_coverage(m["confidence"], labels[p], m["pred"], (1.0, 0.5))
-                    row.update({f"{p} accuracy": cov[0]["accuracy"],
-                                f"{p} macro-F1": r["best"][p]["macro_f1"],
-                                f"{p} AURC": aurc(m["confidence"], m["pred"] == labels[p]),
-                                f"{p} accuracy at 50% coverage": cov[1]["accuracy"]})
-                per_seed.append(row)
-            ens_name = [n for n in methods["val"] if n.startswith("ensemble")][0]
-            row = {"model": ens_name, "epoch kept": ""}
+    # 2. settings compared
+    rows, ens_rows = [], []
+    for name, s in settings.items():
+        row = {"setting": s["what"], "runs": f"`{name}_s*` ({len(s['runs'])} seeds)"}
+        for p in PARTS:
+            row[f"{p} accuracy"] = spread([r["best"][p]["accuracy"] for r in s["runs"]])
+            row[f"{p} macro-F1"] = spread([r["best"][p]["macro_f1"] for r in s["runs"]])
+        rows.append(row)
+        if s["ens_key"]:
+            e = {"setting": s["what"]}
             for p in PARTS:
-                m = methods[p][ens_name]
+                m = summarize(labels[p], s["together"][p][s["ens_key"]]["pred"])
+                e[f"{p} accuracy"], e[f"{p} macro-F1"] = m["accuracy"], m["macro_f1"]
+            ens_rows.append(e)
+    base = settings[base_name]
+    L += ["## 2. Settings compared: mean ± spread over seeds\n",
+          "Every setting is the stack ResNet-18 with the strong augmentation, trained "
+          f"with seeds {', '.join(str(s) for s in args.seeds)}; only the preprocessing "
+          "differs (`src/dataset.py`):\n",
+          "- **per-image normalisation**: each image is shifted and scaled by its own "
+          "channel means and standard deviations instead of ImageNet's fixed ones, which "
+          "removes overall brightness, contrast and colour cast;",
+          "- **histogram matching**: the post image is recoloured so that each channel "
+          "has the pre image's distribution of values.\n",
+          "Single models (each seed on its own):\n",
+          df_to_markdown(pd.DataFrame(rows), index=False) + "\n"]
+    if ens_rows:
+        L += ["Ensemble of each setting's seeds (probabilities averaged; one number per "
+              "setting, so no spread):\n",
+              df_to_markdown(pd.DataFrame(ens_rows), float_fmt="{:.3f}", index=False) + "\n"]
+    # A plain-language reading of each fix against the base, on val.
+    b_acc = np.array([r["best"]["val"]["accuracy"] for r in base["runs"]])
+    b_f1 = np.array([r["best"]["val"]["macro_f1"] for r in base["runs"]])
+    for name, s in list(settings.items())[1:]:
+        acc = np.array([r["best"]["val"]["accuracy"] for r in s["runs"]])
+        f1 = np.array([r["best"]["val"]["macro_f1"] for r in s["runs"]])
+        vt = (np.mean([r["best"]["val-tiles"]["macro_f1"] for r in s["runs"]])
+              - np.mean([r["best"]["val-tiles"]["macro_f1"] for r in base["runs"]]))
+        apart_f1 = f1.min() > b_f1.max() or f1.max() < b_f1.min()
+        apart_acc = acc.min() > b_acc.max() or acc.max() < b_acc.min()
+        L.append(f"- **{s['what']}** against the base, on val: macro-F1 "
+                 f"{f1.mean() - b_f1.mean():+.3f}, accuracy {acc.mean() - b_acc.mean():+.3f} "
+                 f"(difference of means); on val-tiles macro-F1 {vt:+.3f}. The seeds' "
+                 f"val macro-F1 ranges {'do not overlap' if apart_f1 else 'overlap'} and "
+                 f"their val accuracy ranges {'do not overlap' if apart_acc else 'overlap'}"
+                 + (": with 3 seeds each, that is a difference worth taking seriously."
+                    if apart_f1 and apart_acc else
+                    ": with 3 seeds each, overlapping ranges mean the difference could be "
+                    "seed luck." if not (apart_f1 or apart_acc) else
+                    ": mixed evidence."))
+    best_val = max(settings, key=lambda n: np.mean([r["best"]["val"]["accuracy"]
+                                                    for r in settings[n]["runs"]]))
+    acc_best = np.mean([r["best"]["val"]["accuracy"] for r in settings[best_val]["runs"]])
+    L += [f"\nFor scale: always answering no-damage scores {majority['val']['accuracy']:.3f} "
+          f"accuracy on val. The best setting's mean val accuracy is {acc_best:.3f} "
+          f"(`{best_val}`), "
+          + ("still below it." if acc_best < majority["val"]["accuracy"] else "above it.") + "\n"]
+    panels = [(f"{n}, seed 0", {p: s["per_seed"][0][p][SINGLE]["pred"] for p in PARTS})
+              for n, s in settings.items()]
+    plot_confusions(panels, labels, args.fig_dir / "confusion_matrices.png")
+    L += [f"![confusion matrices of seed 0 of each setting]({fig_rel}/confusion_matrices.png)\n"]
+
+    # 3. the key question
+    rows = []
+    for name, s in settings.items():
+        for p in PARTS:
+            per = [flag_stats(m[p][SINGLE], labels[p]) for m in s["per_seed"]]
+            row = {"setting": s["what"], "split": p, "model": f"single ({len(per)} seeds)"}
+            row.update({k: spread([x[k] for x in per]) for k in per[0]})
+            rows.append(row)
+            if s["ens_key"]:
+                e = flag_stats(s["together"][p][s["ens_key"]], labels[p])
+                rows.append({"setting": s["what"], "split": p, "model": "ensemble",
+                             **{k: f"{v:.3f}" for k, v in e.items()}})
+    flags = pd.DataFrame(rows)
+    b = base
+    single_val = [flag_stats(m["val"][SINGLE], labels["val"]) for m in b["per_seed"]]
+    single_vt = [flag_stats(m["val-tiles"][SINGLE], labels["val-tiles"]) for m in b["per_seed"]]
+    L += ["## 3. Does uncertainty flag failure on val?\n",
+          "The triage idea needs the model to be *less sure when it is wrong*, most of "
+          "all on a disaster it has not seen. Three ways to check, for the single model "
+          "(temperature-scaled top probability; mean ± spread over seeds) and for the "
+          "ensemble (averaged probabilities, with its own temperature):\n",
+          "- **AUROC**: the chance that a correct prediction has a higher confidence than "
+          "a wrong one. 0.5 = confidence says nothing; 1 = perfect separation.",
+          "- **errors in the least-confident 20% / 50%**: of all the mistakes, the share "
+          "that sits among the least confident 20% (or 50%) of predictions. Unrelated "
+          "confidence would give 20% (or 50%).",
+          "- **mean confidence** on val against val-tiles, next to accuracy: does the model "
+          "*know* it is on unfamiliar ground? Confidence should fall when accuracy "
+          "falls.\n",
+          df_to_markdown(flags, index=False) + "\n"]
+    conf_drop = np.mean([x["mean confidence"] for x in single_vt]) - np.mean([x["mean confidence"] for x in single_val])
+    acc_drop = np.mean([x["accuracy"] for x in single_vt]) - np.mean([x["accuracy"] for x in single_val])
+    gap_val = np.mean([x["mean confidence"] - x["accuracy"] for x in single_val])
+    L += [f"**Reading it, for the base setting (`{base_name}`), single model:**\n",
+          f"- From val-tiles to val, accuracy falls by {acc_drop:.3f} and mean confidence "
+          f"by {conf_drop:.3f}. " + (
+              "Confidence falls by about as much as accuracy: the model does register that "
+              "val is harder." if abs(conf_drop - acc_drop) < 0.05 else
+              "Confidence falls, but by less than accuracy: the model registers that val "
+              "is harder, and still overstates how well it is doing there "
+              f"(mean confidence exceeds accuracy by {gap_val:.3f} on val)."
+              if conf_drop < acc_drop else
+              "Confidence falls by more than accuracy.") + "",
+          f"- AUROC on val is {np.mean([x['AUROC'] for x in single_val]):.3f} against "
+          f"{np.mean([x['AUROC'] for x in single_vt]):.3f} on val-tiles: confidence still "
+          "ranks mistakes below correct answers on val, but much less sharply.",
+          f"- The least-confident 20% of val predictions hold "
+          f"{np.mean([x['errors in least-confident 20%'] for x in single_val]):.0%} of the "
+          f"val mistakes, and the least-confident 50% hold "
+          f"{np.mean([x['errors in least-confident 50%'] for x in single_val]):.0%} "
+          f"(on val-tiles: {np.mean([x['errors in least-confident 20%'] for x in single_vt]):.0%} "
+          f"and {np.mean([x['errors in least-confident 50%'] for x in single_vt]):.0%})."]
+    if b["ens_key"]:
+        e_val = flag_stats(b["together"]["val"][b["ens_key"]], labels["val"])
+        aurocs = [x["AUROC"] for x in single_val]
+        L.append(f"- The ensemble on val: AUROC {e_val['AUROC']:.3f} (single models "
+                 f"{min(aurocs):.3f}-{max(aurocs):.3f}), "
+                 f"{e_val['errors in least-confident 20%']:.0%} of mistakes in the "
+                 f"least-confident 20%, {e_val['errors in least-confident 50%']:.0%} in the "
+                 "least-confident 50%. "
+                 + ("It ranks mistakes better than every one of its members."
+                    if e_val["AUROC"] > max(aurocs) else
+                    "It is within the range of its members: no clear gain in flagging "
+                    "failure." if e_val["AUROC"] >= min(aurocs) else
+                    "It ranks mistakes worse than its members."))
+        plot_confidence_histograms({p: b["per_seed"][0][p][SINGLE] for p in PARTS},
+                                   {p: b["together"][p][b["ens_key"]] for p in PARTS},
+                                   labels, args.fig_dir / "confidence_right_wrong.png")
+        L += [f"\n![confidence of correct and wrong predictions]({fig_rel}/confidence_right_wrong.png)\n"]
+    L += ["**Short answer:** partly. On val the confidence carries real information about "
+          "which predictions are wrong (AUROC well above 0.5, mistakes concentrated among "
+          "the least confident), but far less than on val-tiles, and with so many "
+          "mistakes on val a large share of them still sits among confident "
+          "predictions. Section 5 turns this into coverage and inspection numbers.\n"]
+
+    # 4. gap diagnosis
+    L += ["## 4. Why is val worse? (gap diagnosis)\n",
+          "Two diagnostics, input swaps (which of the two images carries the shift) and "
+          "colour statistics per disaster, are in **`docs/gap_diagnosis.md`** "
+          "(`scripts/gap_diagnosis.py`). The two fixes in section 2 are the direct test "
+          "of the colour explanation.\n"]
+
+    # 5. calibration and triage of the base setting
+    run0 = base["runs"][0]
+    methods, info = base["together"], base["info"]
+    preds0 = {p: np.load(run0["dir"] / f"preds_{p}.npz") for p in PARTS}
+    cal = []
+    for part in PARTS:
+        rep = calibration_report(preds0[part]["logits"], preds0[part]["labels"], info["temperature"])
+        for when in ("before", "after"):
+            cal.append({"split": part, "temperature scaling": when, "ECE": rep[when]["ece"],
+                        "NLL": rep[when]["nll"], "mean confidence": rep[when]["mean_confidence"],
+                        "accuracy": rep[when]["accuracy"]})
+    rows = []
+    for part in PARTS:
+        y = labels[part]
+        for name, m in methods[part].items():
+            s = summarize(y, m["pred"])
+            rows.append({"split": part, "method": name, "accuracy": s["accuracy"],
+                         "macro-F1": s["macro_f1"],
+                         "ECE": expected_calibration_error(m["confidence"], m["pred"] == y),
+                         "AURC": aurc(m["confidence"], m["pred"] == y)})
+    plot_reliability_methods(methods, labels, args.fig_dir / "reliability_methods.png")
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8))
+    for ax, part in zip(axes, PARTS):
+        plot_risk_coverage(ax, methods[part], labels[part], f"Risk-coverage on {part}")
+    fig.tight_layout()
+    fig.savefig(args.fig_dir / "risk_coverage.png", dpi=130)
+    plt.close(fig)
+    t = info["temperature"]
+    L += [f"## 5. Calibration and triage (`{base_name}`)\n",
+          f"Single model = `{run0['run_name']}`; ensemble = "
+          f"{', '.join('`' + m + '`' for m in info['members'])}.\n",
+          "### Calibration\n",
+          f"Temperature scaling (`src/calibrate.py`): one number T divides the logits, "
+          f"fitted on val-tiles. Single model: **T = {t:.3f}** "
+          + ("(above 1: over-confident, made less sure)" if t > 1 else "(below 1: under-confident)")
+          + (f"; ensemble: T = {info['ensemble_temperature']:.3f}"
+             if info["ensemble_temperature"] else "")
+          + ". ECE = average gap between confidence and accuracy (15 bins); NLL = negative "
+          "log-likelihood. Scaling never changes the predicted class.\n",
+          df_to_markdown(pd.DataFrame(cal), float_fmt="{:.4f}", index=False) + "\n",
+          "All methods (AURC = area under the risk-coverage curve, lower is better):\n",
+          df_to_markdown(pd.DataFrame(rows), float_fmt="{:.4f}", index=False) + "\n",
+          f"![reliability per method]({fig_rel}/reliability_methods.png)\n",
+          f"![risk-coverage curves]({fig_rel}/risk_coverage.png)\n"]
+
+    if base["ens_key"]:
+        # each member alone next to the ensemble
+        per_member = []
+        for r, own in zip(base["runs"], base["per_seed"]):
+            row = {"model": r["run_name"], "epoch kept": f"{r['best_epoch']} of {r['epochs_run']}"}
+            for p in PARTS:
+                m = own[p][SINGLE]
                 cov = at_coverage(m["confidence"], labels[p], m["pred"], (1.0, 0.5))
                 row.update({f"{p} accuracy": cov[0]["accuracy"],
-                            f"{p} macro-F1": summarize(labels[p], m["pred"])["macro_f1"],
+                            f"{p} macro-F1": r["best"][p]["macro_f1"],
                             f"{p} AURC": aurc(m["confidence"], m["pred"] == labels[p]),
                             f"{p} accuracy at 50% coverage": cov[1]["accuracy"]})
-            per_seed.append(row)
-            val_acc = [r_["val accuracy"] for r_ in per_seed[:-1]]
-            L += ["**The ensemble next to each of its members** (each member with its own "
-                  "temperature-scaled top probability):\n",
-                  df_to_markdown(pd.DataFrame(per_seed), float_fmt="{:.3f}", index=False) + "\n",
-                  f"The members agree closely on val-tiles and differ widely on val (accuracy "
-                  f"{min(val_acc):.3f} to {max(val_acc):.3f}): same code, same data, only the "
-                  "seed differs. The tables above compare the ensemble with seed 0, which "
-                  + ("happens to be the weakest member on val" if val_acc[0] == min(val_acc)
-                     else "is one member among several")
-                  + ", so part of the ensemble's advantage there is simply that it is not "
-                  "seed 0. Against its best member on val the ensemble "
-                  + ("is not better" if per_seed[-1]["val accuracy"] < max(val_acc) else "is better")
-                  + ". What the ensemble reliably buys is that the result no longer depends "
-                  "on which seed you happened to train.\n"]
+            per_member.append(row)
+        row = {"model": "ensemble", "epoch kept": ""}
+        for p in PARTS:
+            m = methods[p][base["ens_key"]]
+            cov = at_coverage(m["confidence"], labels[p], m["pred"], (1.0, 0.5))
+            row.update({f"{p} accuracy": cov[0]["accuracy"],
+                        f"{p} macro-F1": summarize(labels[p], m["pred"])["macro_f1"],
+                        f"{p} AURC": aurc(m["confidence"], m["pred"] == labels[p]),
+                        f"{p} accuracy at 50% coverage": cov[1]["accuracy"]})
+        per_member.append(row)
+        L += ["The ensemble next to each of its members (each member with its own "
+              "temperature):\n",
+              df_to_markdown(pd.DataFrame(per_member), float_fmt="{:.3f}", index=False) + "\n"]
 
-        # 7. triage
-        rows = []
-        for part in PARTS:
-            for name, m in methods[part].items():
-                for r in at_coverage(m["confidence"], labels[part], m["pred"]):
-                    rows.append({"split": part, "method": name,
-                                 "coverage": f"{r['coverage']:.0%}", "accuracy": r["accuracy"],
-                                 "macro-F1": r["macro_f1"]})
-        t = pd.DataFrame(rows)
-        wide = t.pivot(index=["split", "method"], columns="coverage", values=["accuracy", "macro-F1"])
-        order = [f"{c:.0%}" for c in COVERAGES]
-        acc = wide["accuracy"][order].reindex([(p, n) for p in PARTS for n in methods[p]])
-        f1 = wide["macro-F1"][order].reindex(acc.index)
-        acc.index = [f"{p} / {n}" for p, n in acc.index]
-        f1.index = acc.index
-        acc.index.name = f1.index.name = "split / method"
+    rows = []
+    for part in PARTS:
+        for name, m in methods[part].items():
+            for r in at_coverage(m["confidence"], labels[part], m["pred"]):
+                rows.append({"split": part, "method": name, "coverage": f"{r['coverage']:.0%}",
+                             "accuracy": r["accuracy"], "macro-F1": r["macro_f1"]})
+    t = pd.DataFrame(rows)
+    wide = t.pivot(index=["split", "method"], columns="coverage", values=["accuracy", "macro-F1"])
+    order = [f"{c:.0%}" for c in COVERAGES]
+    acc = wide["accuracy"][order].reindex([(p, n) for p in PARTS for n in methods[p]])
+    f1 = wide["macro-F1"][order].reindex(acc.index)
+    acc.index = [f"{p} / {n}" for p, n in acc.index]
+    f1.index = acc.index
+    acc.index.name = f1.index.name = "split / method"
 
-        # Inspection budget, for every method that yields probabilities. The entropy
-        # variant shares MC dropout's probabilities, so it only differs in "least
-        # confident first".
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        budget_rows = []
-        for ax, part in zip(axes, PARTS):
-            damaged = labels[part] > 0
-            curves = {}
-            shown = [n for n in methods[part] if n != "max prob (raw)"]
-            for k, name in enumerate(shown):
-                m = methods[part][name]
-                color = METHOD_COLORS[1 + k % (len(METHOD_COLORS) - 1)]
-                curves[f"least confident first: {name}"] = (-m["confidence"], color, "--")
-                budget_rows.append({"split": part, "method": name, "policy": "least confident first",
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    budget_rows = []
+    for ax, part in zip(axes, PARTS):
+        damaged = labels[part] > 0
+        curves = {}
+        for k, name in enumerate(n for n in methods[part] if n != "max prob (raw)"
+                                 and not (n.startswith("ensemble") and "scaled" not in n)):
+            m = methods[part][name]
+            color = METHOD_COLORS[1 + k % (len(METHOD_COLORS) - 1)]
+            for policy, priority, style in (("least confident first", -m["confidence"], "--"),
+                                            ("most likely damaged first", 1 - m["probs"][:, 0], "-")):
+                curves[f"{policy}: {name}"] = (priority, color, style)
+                budget_rows.append({"split": part, "method": name, "policy": policy,
                                     **{f"K={b:.0%}": r for b, r in
-                                       zip(BUDGETS, inspection_recall(-m["confidence"], damaged))
+                                       zip(BUDGETS, inspection_recall(priority, damaged))
                                        if round(b * 100) % 10 == 0}})
-                if name != "MC dropout (entropy)":
-                    p_damaged = 1 - m["probs"][:, 0]
-                    curves[f"most likely damaged first: {name}"] = (p_damaged, color, "-")
-                    budget_rows.append({"split": part, "method": name,
-                                        "policy": "most likely damaged first",
-                                        **{f"K={b:.0%}": r for b, r in
-                                           zip(BUDGETS, inspection_recall(p_damaged, damaged))
-                                           if round(b * 100) % 10 == 0}})
-            plot_inspection(ax, curves, damaged,
-                            f"Inspection budget on {part} ({damaged.mean():.0%} of buildings damaged)")
-        fig.tight_layout()
-        fig.savefig(args.fig_dir / "inspection_budget.png", dpi=130)
-        plt.close(fig)
-        budget = pd.DataFrame(budget_rows).sort_values(
-            ["split", "policy"], key=lambda c: c.map({"val-tiles": 0, "val": 1}).fillna(0)
-            if c.name == "split" else c, kind="stable")
-        L += ["## 7. Triage\n",
-              "**Auto-accept view.** Keep the most confident X% of predictions "
-              "(`src/triage.py`), send the rest to a person. Accuracy on the accepted "
-              "buildings:\n",
-              df_to_markdown(acc, float_fmt="{:.3f}") + "\n",
-              "Macro-F1 on the accepted buildings (the accepted set is mostly easy, "
-              "no-damage buildings; rare classes get rarer in it, so this number is "
-              "noisier and can fall while accuracy rises):\n",
-              df_to_markdown(f1, float_fmt="{:.3f}") + "\n",
-              "**Inspection-budget view.** Inspectors can visit K% of the buildings. Share "
-              "of the truly damaged buildings (minor, major or destroyed) among those "
-              "visited. 'Most likely damaged' ranks by 1 - P(no-damage) under each "
-              "method's probabilities; 'least confident' ranks by each method's "
-              "confidence. Random visits reach K%.\n",
-              df_to_markdown(budget, float_fmt="{:.1%}", index=False) + "\n",
-              f"![inspection budget]({fig_rel}/inspection_budget.png)\n",
-              "In the chart, solid lines are 'most likely damaged first' and dashed lines "
-              "'least confident first'; colour is the method. The two policies answer "
-              "different questions: one looks for damage, the other for the model's "
-              "likely mistakes.\n"]
+        plot_inspection(ax, curves, damaged,
+                        f"Inspection budget on {part} ({damaged.mean():.0%} of buildings damaged)")
+    fig.tight_layout()
+    fig.savefig(args.fig_dir / "inspection_budget.png", dpi=130)
+    plt.close(fig)
+    L += ["### Triage\n",
+          "**Auto-accept view.** Keep the most confident X% of predictions "
+          "(`src/triage.py`), send the rest to a person. Accuracy on the accepted "
+          "buildings:\n",
+          df_to_markdown(acc, float_fmt="{:.3f}") + "\n",
+          "Macro-F1 on the accepted buildings (the accepted set is mostly easy, "
+          "no-damage buildings; rare classes get rarer in it, so this number is "
+          "noisier and can fall while accuracy rises):\n",
+          df_to_markdown(f1, float_fmt="{:.3f}") + "\n",
+          "**Inspection-budget view.** Inspectors can visit K% of the buildings. Share "
+          "of the truly damaged buildings (minor, major or destroyed) among those "
+          "visited. 'Most likely damaged' ranks by 1 - P(no-damage); 'least confident' "
+          "ranks by confidence. Random visits reach K%.\n",
+          df_to_markdown(pd.DataFrame(budget_rows), float_fmt="{:.1%}", index=False) + "\n",
+          f"![inspection budget]({fig_rel}/inspection_budget.png)\n",
+          "In the chart, solid lines are 'most likely damaged first' and dashed lines "
+          "'least confident first'; colour is the method.\n"]
+
+    # 6. MC dropout, set aside
+    mc = pd.DataFrame(MC_DROPOUT_RECORD, columns=["split", "method", "accuracy", "macro-F1", "ECE",
+                                                  "AURC", "accuracy at 80% coverage",
+                                                  "accuracy at 50% coverage"])
+    L += ["## 6. MC dropout: tried and set aside\n",
+          "MC dropout (20 forward passes with dropout left on, each pass "
+          "temperature-scaled; confidence = mean of the passes' top probabilities, or "
+          "minus the entropy of the averaged probabilities) was run once, on an earlier "
+          "`stack_aug` seed-0 model. Its numbers next to the plain top probability of the "
+          "same model:\n",
+          df_to_markdown(mc, float_fmt="{:.4f}", index=False) + "\n",
+          "It is practically identical to the plain top probability on every measure, at "
+          "20 times the prediction cost. The reason is structural: in these models "
+          "dropout sits only in front of the last layer, so the 20 passes barely differ. "
+          "It is therefore no longer part of the comparison. The code remains in "
+          "`src/uncertainty.py` (`mc_dropout_probs`), tested; it would be worth "
+          "revisiting only with dropout inside the backbone, which changes training.\n"]
+
+    # 7. earlier single-run comparisons
+    earlier = pd.DataFrame(EARLIER_RUNS_RECORD, columns=["run", "what", "epoch kept",
+                                                         "val-tiles acc", "val-tiles macro-F1",
+                                                         "val acc", "val macro-F1"])
+    L += ["## 7. Earlier single-run comparisons (recorded)\n",
+          "The first runs, kept for the record. They used the earlier selection rule "
+          "(best single epoch of the mean macro-F1, no 3-epoch window); `siamese_s0` kept "
+          "its weights by val-tiles macro-F1 alone, and its row is taken from its "
+          "per-epoch log. Sanity check before any of this: the siamese model overfitted "
+          "256 training crops to 100% in 4 epochs.\n",
+          df_to_markdown(earlier, float_fmt="{:.3f}", index=False) + "\n",
+          "What they showed: stack edged out siamese on the selection score (0.491 "
+          "against 0.480), and the strong augmentation gave a mixed result against plain "
+          "stack (val macro-F1 +0.011, val accuracy -0.063). Both were one run per "
+          "setting, and the three `stack_aug` seeds differ by more than either gap, so "
+          "neither comparison is settled.\n"]
 
     # 8. all runs
-    all_runs = [load_run(d) for d in sorted(args.runs_dir.iterdir()) if d.is_dir()]
-    all_runs = [r for r in all_runs if r]
-    if all_runs:
-        rows = [{"run": r["run_name"], "augmentation": r.get("augment", "base"), "seed": r["seed"],
-                 "epoch kept": r["rule_epoch"] if r["saved_matches_rule"]
-                 else f"{r['rule_epoch']} (weights saved: {r['best_epoch']})",
-                 "val-tiles acc": r["rule"]["val-tiles"]["accuracy"],
-                 "val-tiles macro-F1": r["rule"]["val-tiles"]["macro_f1"],
-                 "val acc": r["rule"]["val"]["accuracy"],
-                 "val macro-F1": r["rule"]["val"]["macro_f1"],
-                 "selection score": r["rule_score"]} for r in all_runs]
-        L += ["## 8. All runs\n",
-              "Every finished run, at the epoch the selection rule picks. Selection score = "
-              "mean of the val-tiles and val macro-F1.\n",
-              df_to_markdown(pd.DataFrame(rows), float_fmt="{:.3f}", index=False) + "\n",
-              "Time and memory per run:\n",
-              df_to_markdown(cost_rows(all_runs), float_fmt="{:.1f}", index=False) + "\n",
-              "'RAM of this run' is the memory owned by the training process and its "
-              "loader workers; the first run (8 + 8 + 8 workers) did not log it and used "
-              "about 59 GB of the machine's 62 (`BLOCKERS.md`).\n"]
+    all_runs = [r for s in settings.values() for r in s["runs"]]
+    rows = [{"run": r["run_name"], "epoch kept": f"{r['best_epoch']} of {r['epochs_run']}",
+             "val-tiles acc": r["best"]["val-tiles"]["accuracy"],
+             "val-tiles macro-F1": r["best"]["val-tiles"]["macro_f1"],
+             "val acc": r["best"]["val"]["accuracy"], "val macro-F1": r["best"]["val"]["macro_f1"],
+             "smoothed selection score": r["best_selection_score"],
+             "loader workers": r["num_workers"],
+             "train s/epoch": int(round(r["train_seconds_per_epoch"])),
+             "RAM of this run, peak GB": r["run_peak_private_gb"],
+             "RAM free, minimum GB": r["ram_min_available_gb"],
+             "GPU peak GB (reserved)": r["gpu_peak_reserved_gb"] if r["gpu_peak_reserved_gb"] is not None else np.nan}
+            for r in all_runs]
+    L += ["## 8. All runs\n",
+          "Every run behind sections 2-5, at the epoch that was kept.\n",
+          df_to_markdown(pd.DataFrame(rows), float_fmt="{:.3f}", index=False) + "\n",
+          "Per-epoch metrics and memory are in `runs/<run>/log.jsonl` (not in git).\n"]
 
     args.out.write_text("\n".join(L), encoding="utf-8")
-    print(f"Wrote {args.out}" + (f" (base model: {base['run_name'][:-3]})" if base else ""))
+    print(f"Wrote {args.out} (settings: {', '.join(settings)})")
 
 
 if __name__ == "__main__":

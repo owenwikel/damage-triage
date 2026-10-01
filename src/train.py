@@ -14,8 +14,9 @@ What a training run does, in order
     2. build the datasets and loaders (train with augmentation; val-tiles and val without)
     3. build the model, the loss, the optimiser and the learning-rate schedule
     4. for each epoch: one pass over the training set, then evaluate on val-tiles and val
-    5. keep the weights of the best epoch (by the mean of val-tiles and val macro-F1);
-       stop early if there is no improvement for ``patience`` epochs
+    5. keep the weights of the best epoch (by the mean of val-tiles and val macro-F1,
+       averaged over the last 3 epochs); stop early if there is no improvement for
+       ``patience`` epochs
     6. save predictions of the best model on val-tiles and val, for the later analysis
 
 Outputs in runs/<run_name>/ (not in git):
@@ -58,6 +59,9 @@ class Config:
     epochs: int = 10
     patience: int = 3                # early stopping: epochs without improvement allowed
     select_on: str = "mean"          # which score picks the best epoch (see selection_score)
+    select_window: int = 3           # ...averaged over this many epochs (see smoothed_score)
+    normalize: str = "imagenet"      # "imagenet" or "per_image" (src/dataset.py)
+    match_hist: bool = False         # recolour post to pre's colour distribution
     augment: str = "base"            # "base" or "strong" (src/dataset.py, augment_pair)
     batch_size: int = 0              # 0 = probe the GPU for the largest batch that fits
     max_batch_size: int = 512        # ...but never above this (see find_batch_size)
@@ -288,6 +292,25 @@ def selection_score(row, select_on):
     return row[select_on]["macro_f1"]
 
 
+def smoothed_score(scores, window, total_epochs):
+    """Average of the last ``window`` selection scores, or None if there are not enough yet.
+
+    Why smooth? The val score jumps by several points from one epoch to the next (two
+    disasters, few buildings in two of the classes). Keeping "the single best epoch"
+    then partly keeps the luckiest epoch: with the unsmoothed rule, two of four runs
+    kept epoch 4 at exactly such a spike. A 3-epoch average asks for an epoch that sits
+    in a stretch of good epochs. The weights kept are those of the LAST epoch of the
+    best stretch, so the first two epochs can never be kept.
+
+    If the whole run is shorter than the window (tests, quick checks), the window
+    shrinks to the run length.
+    """
+    window = max(1, min(window, total_epochs))
+    if len(scores) < window:
+        return None
+    return float(np.mean(scores[-window:]))
+
+
 def memory_snapshot(device):
     """RAM and GPU memory right now, for the per-epoch log.
 
@@ -357,15 +380,18 @@ def make_loader(dataset, batch_size, shuffle, cfg, seed=None):
 
 def run(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cfg.run_name = cfg.run_name or (f"{cfg.arch}{'_aug' if cfg.augment == 'strong' else ''}"
-                                    f"_s{cfg.seed}")
+    cfg.run_name = cfg.run_name or (cfg.arch + ("_aug" if cfg.augment == "strong" else "")
+                                    + ("_pernorm" if cfg.normalize == "per_image" else "")
+                                    + ("_histmatch" if cfg.match_hist else "")
+                                    + f"_s{cfg.seed}")
     out_dir = Path(cfg.runs_dir) / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg.amp = cfg.amp and device.type == "cuda"    # mixed precision is a GPU feature
     seed_everything(cfg.seed)
 
     # ---- data ----
-    train_set = CropDataset(cfg.cache_dir, "train", augment=False if cfg.overfit else cfg.augment)
+    train_set = CropDataset(cfg.cache_dir, "train", augment=False if cfg.overfit else cfg.augment,
+                            normalize=cfg.normalize, match_hist=cfg.match_hist)
     train_labels = train_set.labels
     eval_sets = {}
     if cfg.overfit:
@@ -378,7 +404,10 @@ def run(cfg):
         train_labels = train_labels[pick]
         eval_sets = {"overfit-subset": train_set}
     else:
-        eval_sets = {p: CropDataset(cfg.cache_dir, p) for p in ("val-tiles", "val")}
+        # Evaluation must see images prepared the same way as in training (normalisation,
+        # histogram matching), only without the random augmentation.
+        eval_sets = {p: CropDataset(cfg.cache_dir, p, normalize=cfg.normalize,
+                                    match_hist=cfg.match_hist) for p in ("val-tiles", "val")}
     select_on = "overfit-subset" if cfg.overfit else cfg.select_on
 
     # ---- model ----
@@ -441,6 +470,9 @@ def run(cfg):
         row["memory"] = memory_snapshot(device)
         if not cfg.overfit:
             row["selection_score"] = selection_score(row, select_on)
+            row["smoothed_score"] = smoothed_score(
+                [h["selection_score"] for h in history] + [row["selection_score"]],
+                cfg.select_window, cfg.epochs)
         history.append(row)
         log.write(json.dumps(row) + "\n")
         log.flush()
@@ -458,10 +490,13 @@ def run(cfg):
 
         # Early stopping. The model keeps improving on the training set for as long as we
         # let it; what we care about is held-out data. So after every epoch we compute a
-        # selection score (see selection_score: by default the mean of the val-tiles and
-        # val macro-F1), keep a copy of the weights whenever it is the best so far, and
-        # stop when it has not improved for ``patience`` epochs.
-        score = row[select_on]["accuracy"] if cfg.overfit else row["selection_score"]
+        # selection score (see selection_score: the mean of the val-tiles and val
+        # macro-F1) and average it over the last few epochs (see smoothed_score). We keep
+        # a copy of the weights whenever that average is the best so far, and stop when
+        # it has not improved for ``patience`` epochs.
+        score = row[select_on]["accuracy"] if cfg.overfit else row["smoothed_score"]
+        if score is None:          # not enough epochs yet for a full window
+            continue
         if score > best:
             best, best_epoch, since_best = score, epoch, 0
             torch.save({"model": model.state_dict(), "config": asdict(cfg), "epoch": epoch},
@@ -497,6 +532,8 @@ def run(cfg):
         "ram_min_available_gb": min(h["memory"]["ram_available_gb"] for h in history),
         "run_peak_private_gb": max(h["memory"]["run_private_gb"] for h in history),
         "num_workers": cfg.num_workers, "augment": cfg.augment,
+        "normalize": cfg.normalize, "match_hist": cfg.match_hist,
+        "select_window": cfg.select_window,
         "best_selection_score": None if cfg.overfit else best,
         "class_weights": weights.cpu().tolist(), "class_names": CLASS_NAMES,
         "best": final, "history": history,

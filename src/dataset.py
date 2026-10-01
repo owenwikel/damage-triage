@@ -135,6 +135,73 @@ def _shift(img, max_shift=4):
     return padded[:, top:top + h, left:left + w]
 
 
+def match_histogram(image, reference, bins=256):
+    """Recolour ``image`` so that each colour channel has the same distribution of values
+    as in ``reference``. Both are CHW float tensors in [0, 1]; returns a new tensor.
+
+    This is classic histogram matching. Per channel:
+      1. count how many pixels have each of the 256 levels, in both images;
+      2. turn the counts into cumulative shares (the CDF): "what share of pixels is at or
+         below this level?";
+      3. send each level of ``image`` to the level of ``reference`` that has the same
+         cumulative share. The darkest 10% of pixels in ``image`` get the values of the
+         darkest 10% in ``reference``, and so on.
+
+    Used for one of the two "cheap fixes" for the val gap: the post image is matched to
+    the pre image, so that a difference in overall colour between the two captures
+    (another sensor, another season, haze) is removed before the model sees them. What
+    is left is WHERE things are bright or dark, which is the structure we want compared.
+    The risk: real damage also changes colour (burn scars, flood water), and that part
+    of the signal is flattened too.
+    """
+    channels = image.shape[0]
+    # Levels 0..255 as integers, one row per channel: [channels, pixels]
+    src = (image * (bins - 1)).round().long().reshape(channels, -1)
+    ref = (reference * (bins - 1)).round().long().reshape(channels, -1)
+    # All channels are counted in one bincount call by giving each channel its own block
+    # of 256 numbers (channel 0 -> 0..255, channel 1 -> 256..511, ...). One call for
+    # three channels is much faster than three calls: this function runs for every
+    # training example.
+    offset = torch.arange(channels).view(channels, 1) * bins
+    src_cdf = torch.bincount((src + offset).flatten(), minlength=channels * bins)
+    ref_cdf = torch.bincount((ref + offset).flatten(), minlength=channels * bins)
+    src_cdf = src_cdf.view(channels, bins).cumsum(1).float() / src.shape[1]
+    ref_cdf = ref_cdf.view(channels, bins).cumsum(1).float() / ref.shape[1]
+    # Lookup table per channel: for each source level, the first reference level whose
+    # cumulative share reaches the source level's cumulative share.
+    lut = torch.searchsorted(ref_cdf, src_cdf).clamp_(max=bins - 1)
+    matched = torch.gather(lut, 1, src).float() / (bins - 1)
+    return matched.view_as(image)
+
+
+def normalize_image(img, mode="imagenet"):
+    """Shift and scale a CHW image in [0, 1] before it goes into the network.
+
+    "imagenet"   subtract ImageNet's channel means, divide by its channel standard
+                 deviations: the same fixed numbers for every image. An image that is
+                 dark overall stays dark relative to the others.
+    "per_image"  subtract THIS image's own channel means and divide by its own channel
+                 standard deviations. Every image then has mean 0 and spread 1 in each
+                 channel, so overall brightness, contrast and colour cast are removed:
+                 a dark, green-tinted disaster looks like a bright, grey one. The other
+                 "cheap fix" for the val gap. The risk is the same as for histogram
+                 matching: overall darkening can be real damage.
+    """
+    img = img.contiguous()
+    if mode == "per_image":
+        flat = img.view(img.shape[0], -1)                 # [channels, pixels]
+        mean = flat.mean(dim=1).view(-1, 1, 1)
+        centred = img - mean
+        # The standard deviation by hand (root of the mean squared distance from the
+        # mean): on this machine torch.std took 1.5 ms per image, this takes 0.1 ms.
+        # clamp: a blank crop has spread 0 and must not be divided by it.
+        std = centred.pow(2).view(img.shape[0], -1).mean(dim=1).sqrt().clamp_min(0.02)
+        return centred / std.view(-1, 1, 1)
+    if mode == "imagenet":
+        return (img - IMAGENET_MEAN) / IMAGENET_STD
+    raise ValueError(f"Unknown normalisation {mode!r}; use 'imagenet' or 'per_image'")
+
+
 class CropDataset(Dataset):
     """Buildings of one split part, as (pre, post, label) triples.
 
@@ -144,10 +211,22 @@ class CropDataset(Dataset):
                 For training only. Validation must see the same images every epoch,
                 otherwise the score would wobble for reasons unrelated to the model.
     final       must be True to load the test part; see src/split.py for why.
+    normalize   "imagenet" (default) or "per_image"; see ``normalize_image``.
+    match_hist  True: recolour the post image to the pre image's colour distribution
+                (``match_histogram``) before normalising.
+
+    ``normalize`` and ``match_hist`` change what the model sees, so they must be the same
+    in training and in every later evaluation of that model. ``from_config`` builds the
+    dataset from a run's saved config to make that automatic.
     """
 
-    def __init__(self, cache_dir, part, augment=False, final=False):
+    def __init__(self, cache_dir, part, augment=False, final=False, normalize="imagenet",
+                 match_hist=False):
         require_final(part, final)          # raises TestSplitError for "test" by default
+        if normalize not in ("imagenet", "per_image"):
+            raise ValueError(f"Unknown normalisation {normalize!r}; use 'imagenet' or 'per_image'")
+        self.normalize = normalize
+        self.match_hist = bool(match_hist)
         self.cache_dir = Path(cache_dir)
         self.part = part
         self.augment = "base" if augment is True else augment
@@ -181,11 +260,23 @@ class CropDataset(Dataset):
         pre, post = self._to_tensor(self._pre[i]), self._to_tensor(self._post[i])
         if self.augment:
             pre, post = augment_pair(pre, post, self.augment)
+        if self.match_hist:
+            # After the augmentation, so that training and evaluation agree: the model
+            # always receives a post image carrying the pre image's colours.
+            post = match_histogram(post, pre)
         # A flipped or rotated tensor is a "view" that reads the same memory in a
-        # different order; .contiguous() rewrites it in plain order (see _to_tensor).
-        pre = (pre.contiguous() - IMAGENET_MEAN) / IMAGENET_STD
-        post = (post.contiguous() - IMAGENET_MEAN) / IMAGENET_STD
-        return pre, post, int(self.labels[i])
+        # different order; normalize_image makes it contiguous first (see _to_tensor).
+        return (normalize_image(pre, self.normalize), normalize_image(post, self.normalize),
+                int(self.labels[i]))
+
+    @classmethod
+    def from_config(cls, config, part, augment=False, final=False):
+        """The dataset as a finished run saw it: ``config`` is the dict saved in best.pt
+        or config.json. Runs from before these options existed lack the keys and get the
+        defaults they were trained with."""
+        return cls(config["cache_dir"], part, augment=augment, final=final,
+                   normalize=config.get("normalize", "imagenet"),
+                   match_hist=config.get("match_hist", False))
 
     @staticmethod
     def _to_tensor(crop):

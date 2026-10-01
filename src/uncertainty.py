@@ -1,11 +1,19 @@
-"""Three ways to get a confidence score for each prediction.
+"""Ways to get a confidence score for each prediction.
 
-Usage (MC dropout needs the GPU; the other two work from saved predictions):
-    .\\.venv\\Scripts\\python.exe -m src.uncertainty --run runs\\siamese_s0 --passes 20
+In use: (a) max softmax probability and (c) the deep ensemble. Both work from the
+predictions saved by src/train.py; ``collect_methods`` builds them.
+
+Set aside: (b) MC dropout. It was tried on the base model and its confidence turned out
+practically identical to (a), at 20 times the cost (docs/results.md has the numbers).
+The reason is structural: dropout sits only in front of the last layer, so the 20 passes
+differ very little. The code stays here, tested, because it documents what was tried and
+because it becomes interesting again if dropout is ever put inside the backbone. It is
+no longer part of the reports. To run it anyway:
+    .\\.venv\\Scripts\\python.exe -m src.uncertainty --run runs\\stack_aug_s0 --passes 20
 
 A confidence score is only useful for triage if it RANKS predictions well: mistakes
-should get low scores, correct predictions high scores. The three methods differ in
-where the doubt comes from and what they cost.
+should get low scores, correct predictions high scores. The methods differ in where the
+doubt comes from and what they cost.
 
 a) Max softmax probability (MSP), after temperature scaling
    Confidence = the largest of the four class probabilities. Free: one forward pass, no
@@ -150,8 +158,7 @@ def method_scores(logits, labels, temperature=None, mc=None, ensemble_logits=Non
 def collect_methods(run_dir, seed_dirs=(), parts=("val-tiles", "val")):
     """Build every available method for one base run from the files in runs/.
 
-    run_dir     the seed-0 run: its logits give the max-prob methods, and its
-                mc_dropout_<part>.npz files (if present) give MC dropout
+    run_dir     the single model: its logits give the max-prob methods
     seed_dirs   all ensemble members' run folders, INCLUDING run_dir; fewer than two
                 finished members means no ensemble
 
@@ -169,10 +176,9 @@ def collect_methods(run_dir, seed_dirs=(), parts=("val-tiles", "val")):
         ens_t = fit_temperature(np.log(np.clip(ens, 1e-12, None)), preds["val-tiles"]["labels"])
     methods = {}
     for p in parts:
-        mc_path = run_dir / f"mc_dropout_{p}.npz"
+        # MC dropout is deliberately not loaded here any more (see the module docstring).
         methods[p] = method_scores(
             preds[p]["logits"], preds[p]["labels"], temperature,
-            mc=dict(np.load(mc_path)) if mc_path.exists() else None,
             ensemble_logits=member_logits[p], ensemble_temperature=ens_t)
     return methods, {"temperature": temperature, "ensemble_temperature": ens_t,
                      "members": [d.name for d in members]}
@@ -206,7 +212,7 @@ def main():
     print(f"temperature {temperature:.3f} (from val-tiles), {args.passes} passes", flush=True)
     for part in args.parts:
         # CropDataset refuses part="test" (src/split.py); there is no --final here on purpose.
-        loader = DataLoader(CropDataset(cfg["cache_dir"], part), batch_size=args.batch_size,
+        loader = DataLoader(CropDataset.from_config(cfg, part), batch_size=args.batch_size,
                             num_workers=args.num_workers, pin_memory=True)
         summary = mc_dropout_summary(mc_dropout_probs(model, loader, device, args.passes,
                                                       temperature=temperature))
