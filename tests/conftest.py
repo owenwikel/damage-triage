@@ -80,3 +80,32 @@ def fake_xbd(tmp_path_factory):
     write_fake_split(data / "train", "fake-fire", "00000001", "fire")
     write_fake_split(data / "test", "fake-flood", "00000002", "flooding")
     return data
+
+
+def write_fake_cache(cache_dir, n=24, parts=("train", "val-tiles", "val"), size=128, seed=0):
+    """Write a tiny crop cache in the layout of scripts/build_crops.py; return its folder.
+
+    Crops are random noise, except that "destroyed" post crops are darkened, so there is
+    something learnable. Labels cycle 0, 1, 2, 3.
+    """
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for part in parts:
+        labels = np.arange(n) % 4
+        pre = rng.integers(0, 256, size=(n, size, size, 3), dtype=np.uint8)
+        post = pre.copy()
+        post[labels == 3] //= 4
+        np.save(cache_dir / f"{part}_pre.npy", pre)
+        np.save(cache_dir / f"{part}_post.npy", post)
+        for i, lab in enumerate(labels):
+            rows.append({"row": i, "uid": f"{part}-{i}", "disaster": "hurricane-harvey",
+                         "part": part, "tile_id": f"{i // 6:08d}", "label": int(lab),
+                         "damage": list(MASK_VALUE)[lab], "box_w": 30.0, "box_h": 20.0,
+                         "box_side": 30.0, "at_edge": i % 5 == 0,
+                         "centroid_x": 100.0 + 40 * (i % 6), "centroid_y": 100.0 + 40 * lab,
+                         "win_left": 0, "win_top": 0, "win_side": 62})
+    pd.DataFrame(rows).to_csv(cache_dir / "index.csv", index=False)
+    return cache_dir

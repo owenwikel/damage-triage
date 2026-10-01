@@ -22,3 +22,6 @@ Thumbs.db
 
 # Claude Code local state
 .claude/
+
+# Training runs (checkpoints, logs, predictions)
+runs/
