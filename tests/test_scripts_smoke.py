@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_fake_split
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -59,6 +61,24 @@ def test_split_candidates(fake_xbd, tmp_path):
     out = tmp_path / "splits.md"
     run("split_candidates.py", "--data-dir", fake_xbd, "--out", out, cwd=tmp_path)
     assert "No candidate is chosen here" in out.read_text(encoding="utf-8")
+
+
+def test_make_split(tmp_path):
+    # make_split.py only accepts the real disaster names, so it gets its own fake data
+    data = tmp_path / "xbd"
+    write_fake_split(data / "train", "hurricane-harvey", "00000001", "flooding")
+    write_fake_split(data / "train", "hurricane-florence", "00000002", "flooding")
+    write_fake_split(data / "test", "hurricane-michael", "00000003", "wind")
+    out, doc = tmp_path / "splits" / "split.csv", tmp_path / "split.md"
+    run("make_split.py", "--data-dir", data, "--out", out, "--doc", doc, cwd=tmp_path)
+    assert out.read_text(encoding="utf-8").splitlines() == [
+        "disaster,tile_id,part",
+        "hurricane-florence,00000002,val",
+        "hurricane-harvey,00000001,train",  # a disaster's only tile is never held out
+        "hurricane-michael,00000003,test",
+    ]
+    assert (tmp_path / "splits" / "split_blocks.csv").exists()
+    assert "## Final split" in doc.read_text(encoding="utf-8")
 
 
 def test_disaster_table(fake_xbd, tmp_path):
