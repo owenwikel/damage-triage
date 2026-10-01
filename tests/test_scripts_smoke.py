@@ -78,7 +78,7 @@ def test_make_split(tmp_path):
         "hurricane-michael,00000003,test",
     ]
     assert (tmp_path / "splits" / "split_blocks.csv").exists()
-    assert "## Final split" in doc.read_text(encoding="utf-8")
+    assert doc.read_text(encoding="utf-8").startswith("# Final split")
 
 
 def test_disaster_table(fake_xbd, tmp_path):
