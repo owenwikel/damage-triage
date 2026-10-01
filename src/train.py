@@ -57,7 +57,7 @@ class Config:
     patience: int = 3                # early stopping: epochs without improvement allowed
     batch_size: int = 0              # 0 = probe the GPU for the largest batch that fits
     max_batch_size: int = 512        # ...but never above this (see find_batch_size)
-    eval_batch_size: int = 1024      # no gradients are stored in evaluation, so it can be bigger
+    eval_batch_size: int = 512       # evaluation stores no gradients, so memory is not the limit
     lr: float = 5e-4                 # peak learning rate
     weight_decay: float = 0.01
     warmup_frac: float = 0.05        # share of all steps spent ramping the lr up from 0
@@ -65,7 +65,7 @@ class Config:
     pretrained: bool = True
     amp: bool = True                 # mixed precision (see train_one_epoch)
     num_workers: int = 6             # background processes that prepare training batches
-    eval_num_workers: int = 3        # ...and per evaluation loader (no augmentation: lighter)
+    eval_num_workers: int = 0        # 0 = evaluation batches are prepared in the main process
     overfit: int = 0                 # N > 0: sanity check, train on N crops only
 
 
@@ -268,9 +268,16 @@ def make_loader(dataset, batch_size, shuffle, cfg, seed=None):
         generator = torch.Generator()
         generator.manual_seed(seed)      # fixes the shuffling order for this run
     # Each worker is a separate Python process that loads and augments crops while the
-    # GPU is busy. On Windows a worker takes several seconds to start (it has to import
-    # PyTorch from scratch), so we start few of them for evaluation and keep all of them
-    # alive between epochs.
+    # GPU is busy. Workers are not free:
+    #   - on Windows each takes several seconds to start (it imports PyTorch from scratch)
+    #     and about 1.6 GB of memory;
+    #   - each keeps 2 finished batches waiting ("prefetch"). A batch of 512 pairs of
+    #     128x128 float images is 200 MB.
+    # The first full run used 8 workers for training AND for each of the two evaluation
+    # loaders, with evaluation batches of 1024: 24 processes and about 59 of the
+    # machine's 62 GB (BLOCKERS.md). Evaluation needs no augmentation and runs once per
+    # epoch, so by default it now loads in the main process (0 workers): a few seconds
+    # slower per epoch, a fraction of the memory.
     workers = cfg.num_workers if shuffle else min(cfg.num_workers, cfg.eval_num_workers)
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, generator=generator,

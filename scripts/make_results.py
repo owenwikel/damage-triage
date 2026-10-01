@@ -216,8 +216,23 @@ def main():
                      "difference of a point or two is within what a different seed could "
                      "produce (compare the three seeds in section 5). The later sections "
                      f"use `{better}`.\n")
-        L += [f"![confusion matrices]({fig_rel}/confusion_matrices.png)\n",
-              "Per-epoch curves are in `runs/<run>/log.jsonl` (not in git).\n"]
+        missing = [a for a in args.archs if a not in runs]
+        if missing:
+            L.append(f"**Not trained yet: {', '.join(f'`{a}`' for a in missing)}** (see "
+                     "`BLOCKERS.md`), so there is no architecture comparison in this "
+                     f"version of the document. The later sections use `{better}`.\n")
+        L += [f"![confusion matrices]({fig_rel}/confusion_matrices.png)\n"]
+        for arch, r in runs.items():
+            epochs = pd.DataFrame([{
+                "epoch": h["epoch"], "train loss": h["train_loss"], "train acc": h["train_acc"],
+                **{f"{p} {k}": h[p][v] for p in PARTS
+                   for k, v in (("loss", "loss"), ("acc", "accuracy"), ("macro-F1", "macro_f1"))},
+                "seconds": h["epoch_seconds"]} for h in r["history"]])
+            L += [f"Per epoch, `{r['run_name']}` (best epoch by val-tiles macro-F1: "
+                  f"**{r['best_epoch']}**; training accuracy is measured on augmented "
+                  "batches while the weights are still changing):\n",
+                  df_to_markdown(epochs, float_fmt="{:.3f}", index=False) + "\n"]
+        L.append("Per-class recall for every epoch is in `runs/<run>/log.jsonl` (not in git).\n")
 
     # 4-6 need the better architecture's seed-0 run
     if better:

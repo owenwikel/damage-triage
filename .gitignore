@@ -1,6 +1,8 @@
 # Data and outputs
 data/
-outputs/
+# outputs/ is ignored except the demo figures, which the README and docs/demo.md show
+outputs/*
+!outputs/demo/
 
 # Virtual environment
 .venv/
