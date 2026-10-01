@@ -6,3 +6,8 @@ matplotlib==3.11.2
 shapely==2.1.2
 pillow==12.3.0
 pytest==9.1.1
+# PyTorch, CPU build (the +cpu wheels on this index are much smaller than the CUDA ones).
+# Model and dataset tests run on CPU with random weights; nothing is downloaded.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0
+torchvision==0.21.0
