@@ -19,7 +19,11 @@ goes through `src/split.py`, which refuses the test part without `final=True`.
   for train, val-tiles and val.
 - Uncertainty signal chosen: top probability of the 3-seed ensemble, temperature-scaled
   (`docs/uncertainty_plan.md`).
-- Tests: 132 pass, 1 skipped (the optional real-data test, which reads test tiles' label
+- Calibration of the ensemble is done (`docs/calibration_results.md`,
+  `scripts/calibrate_ensemble.py`): T = 1.215 fitted on val-tiles; ECE 0.025 to 0.010 on
+  val-tiles and 0.033 to 0.030 on val. A temperature fitted on val itself is nearly the
+  same (1.232). Calibration is not the val problem; accuracy per class is.
+- Tests: 136 pass, 1 skipped (the optional real-data test, which reads test tiles' label
   files and is deliberately not run).
 
 ## Models and checkpoints
