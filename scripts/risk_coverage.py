@@ -13,13 +13,24 @@ R% should go to the person, and how good are the answers that are accepted?
     coverage      the rest: share of buildings whose model answer is auto-accepted
                   (coverage = 1 - review rate; "risk-coverage" is the textbook name)
 
-Two ways to choose who gets reviewed ("ranking scores"):
+Three ways to choose who gets reviewed ("ranking scores"):
 
     least confident first       review the buildings with the LOWEST top probability:
                                 the ones where the model is least sure of its answer,
                                 whatever that answer is.
     most likely damaged first   review the buildings with the HIGHEST 1 - P(no-damage):
                                 the ones the model most suspects of being damaged.
+    doubtful no-damage first    the review queue holds ONLY buildings the model predicts
+                                as no-damage, ordered by the highest 1 - P(no-damage):
+                                "called fine, but with the most doubt". Buildings
+                                predicted damaged are not reviewed at all: they go
+                                straight to the damage map with the model's class.
+                                Why: a miss is, by definition, a building predicted
+                                no-damage. Reviewing a building that is already flagged
+                                as damaged can never catch one.
+
+For all three, the review rate is a share of ALL buildings, so the curves can be
+compared directly: 20% means the same number of person-hours in each.
 
 Three numbers on the auto-accepted rest, for every review rate:
 
@@ -90,7 +101,8 @@ TABLE_RATES = (0, 10, 20, 30)               # the rows shown in the document
 METRICS = {"accuracy": "accuracy", "macro_f1": "macro-F1", "miss_rate": "miss rate"}
 # name -> (label, colour). Colours are the project's (src/triage.py, METHOD_COLORS).
 SCORES = {"confidence": ("least confident first", "#2a78d6"),
-          "p_damaged": ("most likely damaged first", "#e34948")}
+          "p_damaged": ("most likely damaged first", "#e34948"),
+          "no_damage_queue": ("doubtful no-damage first", "#4a3aa7")}
 
 
 def review_priority(probs):
@@ -103,6 +115,13 @@ def review_priority(probs):
         "confidence": -probs.max(axis=1),
         # 1 - P(no-damage) = the probability the model gives to "some damage".
         "p_damaged": 1.0 - probs[:, 0],
+        # The same number, but only for buildings whose predicted class is no-damage
+        # (column 0 is the largest). Everything predicted damaged gets -1, below any
+        # real value (those lie between 0 and 0.75), so it sits at the very end of the
+        # list and is reached only if the whole no-damage queue has been reviewed. That
+        # never happens here: the queue is 64-78% of the buildings and review stops at
+        # 50%.
+        "no_damage_queue": np.where(probs.argmax(axis=1) == 0, 1.0 - probs[:, 0], -1.0),
     }
 
 
@@ -139,7 +158,8 @@ class Curves:
         """Metrics at each review rate (per cent). ``weights``: one number per building
         in the ORIGINAL order; None = every building counts once.
 
-        Returns {"accuracy": [len(rates)], "macro_f1": [...], "miss_rate": [...]}.
+        Returns {"accuracy": [len(rates)], "macro_f1": [...], "miss_rate": [...]} and
+        "queue_share": one number, the (weighted) share of buildings predicted no-damage.
         """
         w = np.ones(len(self.order)) if weights is None else np.asarray(weights, float)[self.order]
         total_weight = w.sum()
@@ -168,7 +188,10 @@ class Curves:
         # the accepted. Divided by ALL damaged buildings, reviewed or not.
         all_damaged = everything.reshape(NUM_CLASSES, NUM_CLASSES)[1:].sum()
         miss_rate = accepted[:, 1:, 0].sum(axis=1) / max(all_damaged, 1e-12)
-        return {"accuracy": accuracy, "macro_f1": macro_f1, "miss_rate": miss_rate}
+        # Column 0 of the whole confusion matrix = everything predicted no-damage.
+        queue_share = everything.reshape(NUM_CLASSES, NUM_CLASSES)[:, 0].sum() / total_weight
+        return {"accuracy": accuracy, "macro_f1": macro_f1, "miss_rate": miss_rate,
+                "queue_share": queue_share}
 
 
 def tile_bootstrap_weights(tile_ids, n_boot, seed):
@@ -193,8 +216,9 @@ def analyse_part(table, n_boot=1000, seed=0, rates=REVIEW_RATES):
 
         score, metric, review_rate, value, lo, hi
 
-    plus rows with score "difference": most-likely-damaged minus least-confident, with
-    the interval of that difference. The difference is computed inside each bootstrap
+    plus rows with score "<score>_minus_confidence": that score minus least-confident,
+    with the interval of that difference, rows "<score>_minus_random", and the
+    "queue_random" baseline (see below). Each difference is computed inside each bootstrap
     round (the same tiles for both scores), which is what makes it a fair comparison:
     whatever a particular draw of tiles does to one score, it does to the other too.
     """
@@ -207,10 +231,13 @@ def analyse_part(table, n_boot=1000, seed=0, rates=REVIEW_RATES):
 
     point = {name: c() for name, c in curves.items()}
     boot = {name: {m: [] for m in METRICS} for name in curves}
+    queue_shares = []
     for weights in tile_bootstrap_weights(tile_ids, n_boot, seed):
         for name, c in curves.items():
-            for metric, values in c(weights).items():
-                boot[name][metric].append(values)
+            out = c(weights)
+            for metric in METRICS:
+                boot[name][metric].append(out[metric])
+        queue_shares.append(out["queue_share"])       # the same for every score
 
     rows = []
 
@@ -223,8 +250,11 @@ def analyse_part(table, n_boot=1000, seed=0, rates=REVIEW_RATES):
     for metric in METRICS:
         for name in curves:
             add(name, metric, point[name][metric], np.array(boot[name][metric]))
-        add("difference", metric, point["p_damaged"][metric] - point["confidence"][metric],
-            np.array(boot["p_damaged"][metric]) - np.array(boot["confidence"][metric]))
+        for name in curves:
+            if name != "confidence":
+                add(f"{name}_minus_confidence", metric,
+                    point[name][metric] - point["confidence"][metric],
+                    np.array(boot[name][metric]) - np.array(boot["confidence"][metric]))
     # Each score against reviewing at random, again inside each bootstrap round. Random
     # review leaves accuracy at its 0% value and scales the misses by the share accepted
     # (see plot_metric), so no simulation is needed: both follow from column 0.
@@ -236,6 +266,27 @@ def analyse_part(table, n_boot=1000, seed=0, rates=REVIEW_RATES):
         add(f"{name}_minus_random", "miss_rate",
             point[name]["miss_rate"] - point[name]["miss_rate"][0] * accepted_share,
             miss - miss[:, :1] * accepted_share)
+    # A second yardstick, for the no-damage queue only: review buildings from that queue
+    # in RANDOM order. Every miss is in the queue (a miss is predicted no-damage), so
+    # reviewing a share s of the queue catches a share s of the misses. A review rate r
+    # of all buildings is a share r / q of the queue, where q = queue size as a share of
+    # all buildings. This separates two effects: what restricting review to the queue
+    # buys (this line against plain random) and what ORDERING the queue buys (the
+    # doubtful-no-damage curve against this line).
+    r = np.asarray(rates) / 100
+
+    def queue_random(miss_at_zero, q):
+        return miss_at_zero * np.clip(1 - r / q, 0, None)
+
+    miss = np.array(boot["no_damage_queue"]["miss_rate"])
+    q_boot = np.array(queue_shares)[:, None]
+    q_point = point["no_damage_queue"]["queue_share"]
+    add("queue_random", "miss_rate", queue_random(point["no_damage_queue"]["miss_rate"][0], q_point),
+        queue_random(miss[:, :1], q_boot))
+    add("no_damage_queue_minus_queue_random", "miss_rate",
+        point["no_damage_queue"]["miss_rate"]
+        - queue_random(point["no_damage_queue"]["miss_rate"][0], q_point),
+        miss - queue_random(miss[:, :1], q_boot))
     info = {"buildings": len(table), "tiles": len(np.unique(tile_ids)),
             "damaged": int((y_true > 0).sum()), "predicted_damaged": int((y_pred > 0).sum())}
     return pd.DataFrame(rows), info
@@ -256,6 +307,11 @@ def plot_metric(results, metric, path, title, ylabel):
         r = np.asarray(REVIEW_RATES)
         random = start * (1 - r / 100) if metric == "miss_rate" else np.full(len(r), start)
         ax.plot(r, random, color="#898781", linestyle="--", linewidth=1.2, label="random review")
+        if metric == "miss_rate":
+            # Random order within the no-damage queue (see analyse_part).
+            d = df[(df["score"] == "queue_random") & (df["metric"] == metric)].sort_values("review_rate")
+            ax.plot(d["review_rate"], d["value"], color=SCORES["no_damage_queue"][1],
+                    linestyle=":", linewidth=1.4, label="no-damage queue, random order")
         ax.set_title(part, fontsize=10)
         ax.set_xlabel("review rate (% of buildings sent to a person)")
         ax.set_ylabel(ylabel)
@@ -288,9 +344,9 @@ def table_at(df, rates=TABLE_RATES):
     return pd.DataFrame(rows)
 
 
-def difference_table(df, score="difference", metrics=tuple(METRICS), rates=TABLE_RATES[1:]):
-    """A difference with its interval, per review rate. ``score`` picks which one:
-    "difference" (most-likely-damaged minus least-confident) or "<score>_minus_random"."""
+def difference_table(df, score, metrics=tuple(METRICS), rates=TABLE_RATES[1:]):
+    """A difference with its interval, per review rate. ``score`` picks which one, for
+    example "p_damaged_minus_confidence" or "confidence_minus_random"."""
     rows = []
     for r in rates:
         row = {"review rate": f"{r}%"}
@@ -342,24 +398,37 @@ def main(argv=None):
                f"damaged ({i['damaged'] / i['buildings']:.1%}); {i['predicted_damaged']:,} "
                f"predicted damaged ({i['predicted_damaged'] / i['buildings']:.1%}).",
                df_to_markdown(table_at(results[part]), index=False),
-               "Most likely damaged first minus least confident first (same tiles in every "
-               "resample; an interval that excludes 0 means the difference is not just "
-               "tile-to-tile noise):",
-               df_to_markdown(difference_table(results[part]), index=False)]
+               "Differences below are computed on the same tiles in every resample; an "
+               "interval that excludes 0 means the difference is not just tile-to-tile noise."]
         print(part)
         print(table_at(results[part]).to_string(index=False))
-        print(difference_table(results[part]).to_string(index=False))
+        for name, (label, _) in SCORES.items():
+            if name == "confidence":
+                continue
+            versus = difference_table(results[part], f"{name}_minus_confidence")
+            md += [f"{label[0].upper() + label[1:]} minus least confident first:",
+                   df_to_markdown(versus, index=False)]
+            print(label, "minus least confident first")
+            print(versus.to_string(index=False))
         for name, (label, _) in SCORES.items():
             vs_random = difference_table(results[part], f"{name}_minus_random",
                                          ("accuracy", "miss_rate"))
             md += [f"{label[0].upper() + label[1:]} minus random review (negative miss rate "
                    "= fewer misses than random):",
                    df_to_markdown(vs_random, index=False)]
+            print(label, "minus random")
             print(vs_random.to_string(index=False))
+        in_queue = difference_table(results[part], "no_damage_queue_minus_queue_random", ("miss_rate",))
+        md += ["Doubtful no-damage first minus the same queue reviewed in random order (what "
+               "the ordering adds on top of restricting review to predicted no-damage):",
+               df_to_markdown(in_queue, index=False)]
+        print("queue order minus queue random")
+        print(in_queue.to_string(index=False))
     md += ["### Plots",
            "![accuracy vs review rate](figures/risk_coverage_accuracy.png)",
            "![miss rate vs review rate](figures/risk_coverage_miss_rate.png)",
-           "The dashed line is what reviewing buildings at random would give. Every review "
+           "The dashed line is what reviewing buildings at random would give; the dotted "
+           "line is random review within the predicted-no-damage queue. Every review "
            "rate from 0 to 50% is in `outputs/risk_coverage/curves.csv` (not in git)."]
     write_section(args.doc, "tables", "\n\n".join(md))
     print(f"Wrote {args.doc}, {args.out / 'curves.csv'} and two figures in {args.fig_dir}")

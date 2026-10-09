@@ -33,7 +33,7 @@ def slow(priority, y_true, y_pred, rate):
             "miss_rate": ((t > 0) & (p == 0)).sum() / (y_true > 0).sum()}
 
 
-@pytest.mark.parametrize("score", ["confidence", "p_damaged"])
+@pytest.mark.parametrize("score", ["confidence", "p_damaged", "no_damage_queue"])
 def test_fast_curves_match_the_definition(score):
     probs, y_true, y_pred = fake()
     priority = rc.review_priority(probs)[score]
@@ -51,6 +51,23 @@ def test_least_confident_and_most_likely_damaged_are_reviewed_first():
     priority = rc.review_priority(probs)
     assert priority["confidence"].argmax() == 1
     assert priority["p_damaged"].argmax() == 2
+
+
+def test_no_damage_queue_reviews_only_predicted_no_damage_most_doubtful_first():
+    probs = np.array([[0.97, 0.01, 0.01, 0.01],     # predicted no-damage, sure
+                      [0.40, 0.30, 0.20, 0.10],     # predicted no-damage, doubtful
+                      [0.02, 0.02, 0.02, 0.94],     # predicted destroyed: not in the queue
+                      [0.60, 0.20, 0.10, 0.10],     # predicted no-damage, in between
+                      [0.30, 0.45, 0.15, 0.10]])    # predicted minor: not in the queue
+    priority = rc.review_priority(probs)["no_damage_queue"]
+    assert np.argsort(-priority, kind="stable").tolist() == [1, 3, 0, 2, 4]
+    # Buildings 1 and 3 are damaged and called no-damage; 2 and 4 are on the map.
+    y_true, y_pred = np.array([0, 2, 3, 1, 0]), probs.argmax(axis=1)
+    out = rc.Curves(priority, y_true, y_pred)(rates=[0, 20, 40])
+    assert out["miss_rate"] == pytest.approx([2 / 3, 1 / 3, 0.0])     # 3 damaged in all
+    assert out["queue_share"] == pytest.approx(3 / 5)
+    # A whole queue reviewed leaves no misses, and reviewing the map changes nothing more.
+    assert rc.Curves(priority, y_true, y_pred)(rates=[60, 80])["miss_rate"] == pytest.approx([0, 0])
 
 
 def test_miss_rate_counts_only_accepted_damaged_buildings_called_no_damage():
@@ -101,11 +118,18 @@ def test_end_to_end_on_synthetic_predictions(tmp_path):
     curves = pd.read_csv(tmp_path / "out" / "curves.csv")
     assert set(curves["part"]) == {"val-tiles", "val"}             # never test
     main_rows = curves[curves["score"].isin(rc.SCORES)]
-    assert len(main_rows) == 2 * 2 * 3 * 51                 # parts x scores x metrics x rates
+    assert len(main_rows) == 2 * 3 * 3 * 51                 # parts x scores x metrics x rates
     assert (main_rows["lo"] <= main_rows["hi"]).all()
-    # with nobody reviewed, the two ranking scores describe the same set of buildings
+    # with nobody reviewed, all ranking scores describe the same set of buildings
     zero = main_rows[main_rows["review_rate"] == 0]
     assert zero.groupby(["part", "metric"])["value"].nunique().eq(1).all()
+    # random order within the no-damage queue: starts at the same miss rate, never rises
+    queue_random = curves[curves["score"] == "queue_random"].sort_values(["part", "review_rate"])
+    assert set(queue_random["metric"]) == {"miss_rate"} and len(queue_random) == 2 * 51
+    for part, d in queue_random.groupby("part"):
+        start = zero[(zero["part"] == part) & (zero["metric"] == "miss_rate")]["value"].iloc[0]
+        assert d["value"].iloc[0] == pytest.approx(start)
+        assert (np.diff(d["value"]) <= 1e-12).all()
     assert (figs / "risk_coverage_accuracy.png").exists()
     assert (figs / "risk_coverage_miss_rate.png").exists()
     text = doc.read_text(encoding="utf-8")

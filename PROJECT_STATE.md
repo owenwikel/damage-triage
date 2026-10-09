@@ -28,7 +28,12 @@ goes through `src/split.py`, which refuses the test part without `final=True`.
   confident buildings cuts the miss rate from 0.163 to 0.059 on val-tiles, but only
   from 0.374 to 0.283 on val, where random review would give 0.299. Ranking by
   P(damaged) does not reduce misses until everything predicted damaged is reviewed.
-- Tests: 143 pass, 1 skipped (the optional real-data test, which reads test tiles' label
+  A third queue, only buildings predicted no-damage and the most doubtful first, does
+  far better on misses: 0.022 on val-tiles and 0.185 on val at 20% review. Its cost:
+  buildings predicted damaged are never reviewed, and on val only 21% of them are
+  truly damaged.
+- Untracked `risk_coverage.ipynb` in the repo root is not part of this work.
+- Tests: 145 pass, 1 skipped (the optional real-data test, which reads test tiles' label
   files and is deliberately not run).
 
 ## Models and checkpoints
