@@ -23,7 +23,12 @@ goes through `src/split.py`, which refuses the test part without `final=True`.
   `scripts/calibrate_ensemble.py`): T = 1.215 fitted on val-tiles; ECE 0.025 to 0.010 on
   val-tiles and 0.033 to 0.030 on val. A temperature fitted on val itself is nearly the
   same (1.232). Calibration is not the val problem; accuracy per class is.
-- Tests: 136 pass, 1 skipped (the optional real-data test, which reads test tiles' label
+- Risk-coverage analysis of the ensemble is done (`docs/risk_coverage.md`,
+  `scripts/risk_coverage.py`; tile-level bootstrap intervals). Reviewing the 20% least
+  confident buildings cuts the miss rate from 0.163 to 0.059 on val-tiles, but only
+  from 0.374 to 0.283 on val, where random review would give 0.299. Ranking by
+  P(damaged) does not reduce misses until everything predicted damaged is reviewed.
+- Tests: 143 pass, 1 skipped (the optional real-data test, which reads test tiles' label
   files and is deliberately not run).
 
 ## Models and checkpoints
