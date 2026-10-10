@@ -39,6 +39,14 @@ goes through `src/split.py`, which refuses the test part without `final=True`.
   base model stays the model of record. Details in the next section.
 - `README.md` is rewritten to the current state; val-only demo figures are in
   `docs/figures/demo_val_*.jpg` (`docs/demo_val.md`).
+- **Error analysis extended** (`docs/error_analysis.md`, base model seed 0, val-tiles and
+  val): confusion per disaster and class, which damaged buildings are missed, six val
+  tiles of missed damage (`docs/figures/missed_damage_val_*.jpg`), and a label-noise
+  check. On val most errors are false alarms (36% of undamaged buildings are called
+  damaged); misses concentrate in hurricane-florence major-damage (482 buildings) and
+  minor-damage has the highest miss rate (59%). Label-noise candidates are 5-9 times
+  over-represented among the most confident val errors but are still under 10% of
+  them (43 of the top 500). No label was changed.
 - Tests: 162 pass, 1 skipped (the optional real-data test, which reads test tiles' label
   files and is deliberately not run).
 

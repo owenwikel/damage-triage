@@ -93,12 +93,17 @@ def test_error_analysis(workspace):
     out.parent.mkdir(exist_ok=True)
     command(REPO / "scripts" / "error_analysis.py", "--run", workspace / "runs" / "stack_aug_s0",
             "--cache-dir", workspace / "cache", "--out", out,
-            "--fig-dir", workspace / "docs" / "figures", "--gallery", 4)
+            "--fig-dir", workspace / "docs" / "figures", "--gallery", 4,
+            "--noise-csv", workspace / "no_such_candidates.csv")
     text = out.read_text(encoding="utf-8")
     for heading in ("## 1. Per disaster", "## 2. By building size", "## 3. Cut by the tile edge",
                     "## 4. Label-noise candidates", "## 5. Is uncertainty higher", "## 6. Gallery",
-                    "## 7. The same questions for every uncertainty method"):
+                    "## 7. The same questions for every uncertainty method",
+                    "## 8. Confusion per part, per disaster and per class",
+                    "## 9. Missed damage: which buildings?"):
         assert heading in text
+    # sections 10 (needs the tile images) and 11 (needs the candidates file) are skipped
+    assert "## 10." not in text and "## 11." not in text
     assert "ensemble of 2" in text and "MC dropout" not in text
     gallery = workspace / "runs" / "stack_aug_s0" / "gallery"
     assert (gallery / "confident_mistakes.png").exists() or (gallery / "unsure_correct.png").exists()

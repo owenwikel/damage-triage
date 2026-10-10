@@ -16,9 +16,18 @@ Sections
     6. gallery: most confident mistakes, least confident correct predictions
     7. sections 4 and 5 again for every uncertainty method (MC dropout, ensemble), when
        the base run has them
+    8. confusion: for every part and disaster, where the buildings of each true class go
+    9. missed damage (truly damaged, predicted no-damage): by disaster, class and size
+   10. example val tiles with the most missed damage -> docs/figures/ (needs --data-dir)
+   11. are the most confident "errors" on val label noise? Uses the candidates of
+       outputs/label_noise/candidates.csv. No label is changed anywhere.
+
+Full run, with the tile figures:
+    .\\.venv\\Scripts\\python.exe scripts\\error_analysis.py --run runs\\stack_aug_s0 --data-dir C:\\Users\\wikel\\dev\\xbd-data
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -164,10 +173,168 @@ def draw_gallery(rows, cache_dir, title, path):
     plt.close(fig)
 
 
+# ---- sections 8-11: confusion, missed damage, example tiles, label noise -------------------
+
+def confusion_table(df):
+    """Long-format confusion matrices: one row per (group of buildings, true class).
+
+    Groups: each part as a whole, then every disaster. The four "-> class" columns are
+    COUNTS of buildings of that true class given each predicted class; "found" is the
+    share on the diagonal (the class's recall).
+    """
+    groups = [(f"{part} (all)", df[df["part"] == part]) for part in PARTS]
+    for part in PARTS:
+        sub = df[df["part"] == part]
+        groups += [(f"{part}: {d}", g) for d, g in sub.groupby("disaster")]
+    rows = []
+    for name, g in groups:
+        cm = summarize(g["label"].to_numpy(), g["pred"].to_numpy())["confusion"]
+        for c, class_name in enumerate(CLASS_NAMES):
+            n = sum(cm[c])
+            if n == 0:                     # this class does not occur in the group
+                continue
+            rows.append({"buildings": name, "true class": class_name, "n": n,
+                         **{f"-> {SHORT[j]}": cm[c][j] for j in range(len(SHORT))},
+                         "found": cm[c][c] / n})
+    return pd.DataFrame(rows)
+
+
+def missed_table(df, by, order=None):
+    """Missed damage per group: of the truly damaged buildings (label 1-3) in the group,
+    how many were predicted no-damage. One table per call, both parts in it."""
+    damaged = df[df["label"] > 0]
+    rows = []
+    for (part, key), g in damaged.groupby(["part", by], observed=True, sort=False):
+        missed = int((g["pred"] == 0).sum())
+        all_missed = int((damaged.loc[damaged["part"] == part, "pred"] == 0).sum())
+        rows.append({"split": part, by: key, "damaged buildings": len(g), "missed": missed,
+                     "miss rate": missed / len(g),
+                     "share of the split's misses": missed / max(all_missed, 1),
+                     "mean confidence of the misses":
+                         g.loc[g["pred"] == 0, "confidence"].mean() if missed else np.nan})
+    t = pd.DataFrame(rows)
+    t["split"] = pd.Categorical(t["split"], PARTS)
+    if order is not None:
+        t[by] = pd.Categorical(t[by], order)
+    return t.sort_values(["split", by]).reset_index(drop=True)
+
+
+def draw_missed_tile(tile, data_dir, path):
+    """One val tile: before | after, with the missed buildings picked out.
+
+    Three kinds of outline on the "after" panel:
+      thick, in the colour of the TRUE class   damaged, but the model said no-damage
+      thin black                               damaged, and the model did report damage
+      thin white                               truly undamaged
+    The images and outlines come from the tile's own files; only val and val-tiles tiles
+    can be looked up (load_split refuses the test part).
+    """
+    from matplotlib.collections import PatchCollection
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Polygon as MplPolygon
+    from PIL import Image
+
+    from src.labels import parse_label_file
+    from src.split import find_folder, load_split
+
+    first = tile.iloc[0]
+    disaster, tile_id = first["disaster"], first["tile_id"]
+    allowed = load_split()                       # development parts only
+    assert ((allowed["disaster"] == disaster) & (allowed["tile_id"] == tile_id)).any()
+    folder = find_folder(data_dir, disaster, tile_id)
+    stem = f"{disaster}_{tile_id}"
+    polys = {r["uid"]: r["polygon"] for r in parse_label_file(
+        folder / "labels" / f"{stem}_post_disaster.json", folder / "images")}
+    pre = np.asarray(Image.open(folder / "images" / f"{stem}_pre_disaster.png").convert("RGB"))
+    post = np.asarray(Image.open(folder / "images" / f"{stem}_post_disaster.png").convert("RGB"))
+
+    def patches(rows):
+        return [MplPolygon(np.asarray(polys[u].exterior.coords), closed=True) for u in rows["uid"]]
+
+    damaged = tile["label"] > 0
+    missed = tile[damaged & (tile["pred"] == 0)]
+    caught = tile[damaged & (tile["pred"] > 0)]
+    fine = tile[~damaged]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 7), dpi=100)
+    axes[0].imshow(pre)
+    axes[0].set_title("Before", loc="left", fontsize=12, color=INK)
+    ax = axes[1]
+    ax.imshow(post)
+    ax.set_title("After: damaged buildings the model called no-damage", loc="left",
+                 fontsize=12, color=INK)
+    if len(fine):
+        ax.add_collection(PatchCollection(patches(fine), facecolor="none", edgecolor="white",
+                                          linewidth=0.9, alpha=0.9))
+    if len(caught):
+        ax.add_collection(PatchCollection(patches(caught), facecolor="none", edgecolor="white",
+                                          linewidth=2.4))
+        ax.add_collection(PatchCollection(patches(caught), facecolor="none", edgecolor="#0b0b0b",
+                                          linewidth=1.1))
+    if len(missed):
+        colors = [DAMAGE_COLORS[CLASS_NAMES[i]] for i in missed["label"]]
+        ax.add_collection(PatchCollection(patches(missed), facecolor="none", edgecolor="white",
+                                          linewidth=4.2))
+        ax.add_collection(PatchCollection(patches(missed), facecolor=colors, edgecolor=colors,
+                                          linewidth=2.4, alpha=0.55))
+        ax.add_collection(PatchCollection(patches(missed), facecolor="none", edgecolor=colors,
+                                          linewidth=2.4))
+    for a in axes:
+        a.set_xlim(0, post.shape[1])
+        a.set_ylim(post.shape[0], 0)
+        a.axis("off")
+    handles = [Line2D([0], [0], color=DAMAGE_COLORS[c], linewidth=4, label=f"missed, truly {c}")
+               for c in CLASS_NAMES[1:]]
+    handles += [Line2D([0], [0], color="#0b0b0b", linewidth=1.4, label="damaged, reported as damaged"),
+                Line2D([0], [0], color="#898781", linewidth=1.0, label="truly undamaged (white outline)")]
+    legend = fig.legend(handles=handles, loc="lower center", ncols=5, frameon=False, fontsize=9,
+                        labelcolor=INK_SECONDARY, bbox_to_anchor=(0.5, 0.005))
+    legend.set_in_layout(False)
+    fig.suptitle(f"{disaster}, tile {tile_id}   |   unseen disaster (val)   |   model: "
+                 f"predictions of the base model\n{int(damaged.sum())} damaged buildings of "
+                 f"{len(tile)}: {len(missed)} missed (called no-damage), {len(caught)} reported "
+                 "as damaged", x=0.01, ha="left", fontsize=12, color=INK)
+    fig.tight_layout(rect=(0, 0.045, 1, 0.93))
+    fig.savefig(path, facecolor=fig.get_facecolor(), pil_kwargs={"quality": 88})
+    plt.close(fig)
+    return {"disaster": disaster, "tile": tile_id, "buildings": len(tile),
+            "damaged": int(damaged.sum()), "missed": len(missed), "file": Path(path).name}
+
+
+def load_val_noise_candidates(csv_path, val):
+    """Label-noise candidates (docs/label_noise.md) that are val buildings.
+
+    Returns a DataFrame indexed by uid with the column ``neighbour_majority`` (the most
+    common class among the building's 5 nearest neighbours), or None without the file.
+
+    CAREFUL: the candidates file was written during the first data exploration, before
+    the split existed, and it also lists buildings of the two TEST disasters. Those rows
+    are thrown away while the file is being read: only rows of the val disasters are
+    kept, and of those only buildings that are in val. Nothing about a test building is
+    used, shown or stored.
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        return None
+    val_disasters = set(val["disaster"])
+    kept = []
+    # Read in pieces and filter each piece at once, so that the unwanted rows never sit
+    # in a table that later code could reach.
+    for chunk in pd.read_csv(csv_path, usecols=["disaster", "uid", "neighbour_majority"], chunksize=500):
+        kept.append(chunk[chunk["disaster"].isin(val_disasters)])
+    cand = pd.concat(kept, ignore_index=True)
+    cand = cand[cand["uid"].isin(set(val["uid"]))]
+    return cand.set_index("uid")[["neighbour_majority"]]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, type=Path)
+    ap.add_argument("--data-dir", type=Path, default=None,
+                    help="xBD folder; needed only for the example tiles of section 10")
+    ap.add_argument("--noise-csv", type=Path, default=Path("outputs/label_noise/candidates.csv"),
+                    help="label-noise candidates for section 11 (skipped if the file is missing)")
+    ap.add_argument("--tiles", type=int, default=6, help="example tiles in section 10")
     ap.add_argument("--cache-dir", type=Path, default=Path(r"C:\Users\wikel\dev\xbd-data\crops"))
     ap.add_argument("--out", type=Path, default=Path("docs/error_analysis.md"))
     ap.add_argument("--fig-dir", type=Path, default=Path("docs/figures"))
@@ -338,6 +505,120 @@ def main():
           "For entropy the 'confidence' is minus the predictive entropy, so only its "
           "ranking is meaningful.\n"]
 
+    # 8. confusion per part and per disaster
+    L += ["## 8. Confusion per part, per disaster and per class\n",
+          "One row per true class: how many of its buildings the model put in each class "
+          "(counts), and the share it got right ('found'). Classes that do not occur in a "
+          "group are left out.\n",
+          df_to_markdown(confusion_table(df), float_fmt="{:.3f}", index=False) + "\n"]
+
+    # 9. missed damage
+    df["true class"] = df["label"].map(lambda i: CLASS_NAMES[i])
+    L += ["## 9. Missed damage: which buildings?\n",
+          "A *miss* is a truly damaged building (minor, major or destroyed) that the model "
+          "calls no-damage. miss rate = misses / damaged buildings in the group. 'Share of "
+          "the split's misses' says where the bulk of the misses is; a group can have a high "
+          "miss rate and still hold few of them.\n",
+          "By disaster:\n",
+          df_to_markdown(missed_table(df, "disaster"), float_fmt="{:.3f}", index=False) + "\n",
+          "By true class:\n",
+          df_to_markdown(missed_table(df, "true class", CLASS_NAMES[1:]), float_fmt="{:.3f}",
+                         index=False) + "\n",
+          "By building size (longest side of the bounding box, tile pixels):\n",
+          df_to_markdown(missed_table(df, "size", SIZE_LABELS), float_fmt="{:.3f}", index=False) + "\n",
+          "Cut by the tile edge or not:\n",
+          df_to_markdown(missed_table(df, "position"), float_fmt="{:.3f}", index=False) + "\n"]
+    val = df[df["part"] == "val"]
+    val_damaged = val[val["label"] > 0].copy()
+    val_damaged["group"] = val_damaged["disaster"] + ", " + val_damaged["true class"]
+    by_both = (val_damaged.assign(missed=val_damaged["pred"] == 0)
+               .groupby("group")["missed"].agg(["size", "sum", "mean"]).reset_index())
+    by_both.columns = ["val: disaster, true class", "damaged buildings", "missed", "miss rate"]
+    L += ["val, disaster and class together:\n",
+          df_to_markdown(by_both, float_fmt="{:.3f}", index=False) + "\n"]
+
+    # 10. example tiles
+    if args.data_dir is not None:
+        per_tile = (val.assign(missed=(val["label"] > 0) & (val["pred"] == 0))
+                    .groupby(["disaster", "tile_id"])
+                    .agg(missed=("missed", "sum"), n=("label", "size")).reset_index())
+        # Half of the tiles from each val disaster, most misses first, so that one
+        # disaster does not fill the page. Tiles with a readable number of buildings.
+        per_tile = per_tile[per_tile["n"] <= 200].sort_values(
+            ["missed", "n"], ascending=[False, True], kind="stable")
+        share = max(1, args.tiles // max(per_tile["disaster"].nunique(), 1))
+        picks = per_tile.groupby("disaster", sort=True).head(share).head(args.tiles)
+        infos = []
+        for r in picks.itertuples():
+            tile = val[(val["disaster"] == r.disaster) & (val["tile_id"] == r.tile_id)]
+            path = args.fig_dir / f"missed_damage_val_{r.disaster}_{r.tile_id}.jpg"
+            infos.append(draw_missed_tile(tile, args.data_dir, path))
+            print(f"wrote {path}")
+        L += ["## 10. Example tiles of missed damage (val)\n",
+              f"The {len(infos)} val tiles with the most missed buildings, {share} per "
+              "disaster (tiles with at most 200 buildings). **They are the worst cases, picked "
+              "because the model failed on them, not typical tiles.** All are from val, the "
+              "unseen disasters; every figure says so in its title.\n"]
+        for i in infos:
+            L += [f"**{i['disaster']}, tile {i['tile']} (val)**: {i['damaged']} damaged buildings "
+                  f"of {i['buildings']}, {i['missed']} missed.\n",
+                  f"![missed damage, {i['disaster']} {i['tile']}, val]({fig_rel}/{i['file']})\n"]
+
+    # 11. are the most confident "errors" on val label noise?
+    noise_val = load_val_noise_candidates(args.noise_csv, val)
+    if noise_val is not None:
+        errors = val[~val["correct"]].sort_values("confidence", ascending=False).copy()
+        errors["candidate"] = errors["uid"].isin(noise_val.index)
+        errors["neighbours"] = errors["uid"].map(noise_val["neighbour_majority"])
+        # "Looks like label noise" here means two independent hints agree: the label
+        # disagrees with all 5 neighbours, AND the model predicts what the neighbours are.
+        errors["sides_with_neighbours"] = errors["candidate"] & (
+            errors["pred"].map(lambda i: CLASS_NAMES[i]) == errors["neighbours"])
+        n_val, n_cand = len(val), int(val["uid"].isin(noise_val.index).sum())
+        rows = []
+        for top in (50, 100, 200, 500, 1000, len(errors)):
+            head = errors.head(top)
+            rows.append({"errors looked at": ("all " if top == len(errors) else "top ") + f"{len(head):,}",
+                         "lowest confidence among them": head["confidence"].min(),
+                         "label-noise candidates": int(head["candidate"].sum()),
+                         "share": head["candidate"].mean(),
+                         "of those, model predicts the neighbours' class":
+                             int(head["sides_with_neighbours"].sum())})
+        L += ["## 11. Are the most confident 'errors' on val label noise?\n",
+              f"An 'error' is a val building whose prediction differs from its label; "
+              f"{len(errors):,} of {n_val:,}. They are sorted by the model's confidence, highest "
+              "first. A *label-noise candidate* (`docs/label_noise.md`, "
+              f"`{args.noise_csv.as_posix()}`) is a building whose label differs from the label "
+              f"of all 5 nearest neighbours in its tile; {n_cand:,} val buildings are candidates "
+              f"({n_cand / n_val:.1%} of val), so that is the share to expect if confident "
+              "errors had nothing to do with label noise. **No label was changed.** The "
+              "candidates file also contains test-disaster rows from the first data "
+              "exploration; they are discarded on reading and play no part here.\n",
+              df_to_markdown(pd.DataFrame(rows), float_fmt="{:.3f}", index=False) + "\n"]
+        examples = errors[errors["candidate"]].head(6)
+        if len(examples):
+            path = args.fig_dir / "label_noise_val_examples.png"
+            draw_gallery(examples, args.cache_dir,
+                         f"val: the {len(examples)} most confident 'errors' that are label-noise "
+                         "candidates", path)
+            ex = examples[["disaster", "tile_id", "uid"]].copy()
+            ex["label"] = examples["label"].map(lambda i: CLASS_NAMES[i])
+            ex["predicted"] = examples["pred"].map(lambda i: CLASS_NAMES[i])
+            ex["confidence"] = examples["confidence"]
+            ex["neighbours' most common class"] = examples["neighbours"]
+            L += [f"The {len(examples)} most confident errors that are candidates (all val):\n",
+                  df_to_markdown(ex, float_fmt="{:.3f}", index=False) + "\n",
+                  f"![label-noise examples on val]({fig_rel}/{path.name})\n"]
+
+    # A hand-written reading may sit in the document between two marker comments. It is
+    # carried over to the new version, right after the introduction, so that running
+    # this script again does not wipe it. (Whoever regenerates the tables must still
+    # check that the reading matches them.)
+    if args.out.exists():
+        kept = re.search(r"<!-- reading:start -->.*?<!-- reading:end -->",
+                         args.out.read_text(encoding="utf-8"), re.DOTALL)
+        if kept:
+            L.insert(3, kept.group(0) + "\n")
     args.out.write_text("\n".join(L), encoding="utf-8")
     print(f"Wrote {args.out} and {gallery_dir}")
 
