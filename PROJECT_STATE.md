@@ -3,9 +3,44 @@
 The one place that says where the project stands. `SESSION_REPORT.md` is the log of what
 happened in each session; `docs/results.md` holds the full tables.
 
-**Validation only. The test set (hurricane-michael, santa-rosa-wildfire) has never been
-loaded, evaluated or looked at.** The crop cache holds no test crops, and every loader
-goes through `src/split.py`, which refuses the test part without `final=True`.
+**The test set has been evaluated, once, on 2026-10-10.** Protocol
+`docs/test_protocol.md` (committed first, `14cfb0e`), results `docs/test_results.md`,
+lock `TEST_EVALUATION.lock`. The project's modelling work is closed: nothing may be
+changed and re-scored on test. Everything else in this file is validation.
+
+The development crop cache still holds no test crops (they are in a separate folder,
+`C:\Users\wikel\dev\xbd-data\crops_test_final`), test predictions are in
+`outputs/predictions_test/` apart from the development predictions, and every
+development loader still refuses the test part (`src/split.py`).
+
+## Final held-out result (test)
+
+Ensemble of `stack_aug_s0..2`, mean softmax, no temperature; queue "doubtful no-damage
+first"; 20% review; 95% intervals from 1000 tile-bootstrap resamples.
+
+| test | hurricane-michael | santa-rosa-wildfire | both |
+|---|---|---|---|
+| buildings / tiles | 28,056 / 426 | 17,111 / 291 | 45,167 / 717 |
+| missed-damage rate, nobody reviewed | 0.614 | 0.074 | 0.441 |
+| missed-damage rate, 20% random review | 0.491 | 0.059 | 0.353 |
+| missed-damage rate, 20%, queue in random order | 0.449 | 0.050 | 0.315 |
+| **missed-damage rate, 20%, doubtful no-damage first** | **0.390 (0.368-0.411)** | **0.026 (0.018-0.038)** | **0.272 (0.241-0.303)** |
+| accuracy / macro-F1 on accepted, 20% | 0.599 / 0.392 | 0.828 / 0.456 | 0.686 / 0.512 |
+| share of predicted damage that is real | 0.526 | 0.670 | 0.593 |
+| accuracy, nobody reviewed (always "no-damage") | 0.601 (0.650) | 0.849 (0.731) | 0.695 (0.681) |
+| recall no-damage / minor / major / destroyed | 0.81 / 0.21 / 0.14 / 0.32 | 0.83 / 0.03 / 0.06 / 0.93 | 0.82 / 0.21 / 0.14 / 0.82 |
+
+- The queue beat both baselines in both disasters, outside the intervals. It still
+  leaves 27% of damaged buildings accepted as undamaged (39% in michael).
+- santa-rosa-wildfire behaves like the training disasters; hurricane-michael is worse
+  than a constant answer and misses 61% of damage before review.
+- With test's class mix, val's class-by-class miss rates give 0.444 (no review) and
+  0.265 (20%), against 0.441 and 0.272 on test: about what val predicted, though
+  major-damage is missed more and destroyed less than on val (exploratory section of
+  the results document).
+- The run: test crops built (45,167 buildings, 717 tiles), export ran once
+  (2026-10-10 08:53-08:54), no crash, no rerun. A second start of the export is refused
+  by the lock (checked).
 
 ## Where things stand
 
@@ -47,7 +82,7 @@ goes through `src/split.py`, which refuses the test part without `final=True`.
   minor-damage has the highest miss rate (59%). Label-noise candidates are 5-9 times
   over-represented among the most confident val errors but are still under 10% of
   them (43 of the top 500). No label was changed.
-- Tests: 162 pass, 1 skipped (the optional real-data test, which reads test tiles' label
+- Tests: 170 pass, 1 skipped (the optional real-data test, which reads test tiles' label
   files and is deliberately not run).
 
 ## The overnight session of 2026-10-10
@@ -202,7 +237,8 @@ Nothing is broken: the whole test suite passes. Stale or to be aware of:
 
 ## Open decisions
 
-1. **What next for the val gap?** Four changes are now rejected with 3 seeds each (two
+1. **What next for the val gap?** (Closed for this project by the test evaluation; kept
+   as the record of where things stood.) Four changes are now rejected with 3 seeds each (two
    colour fixes, two pre-image fixes). Options not yet tried: more context around each
    building; training on more or different disasters (for example moving a flood
    disaster from val into training, which costs a val disaster); or accepting the gap
@@ -211,9 +247,9 @@ Nothing is broken: the whole test suite passes. Stale or to be aware of:
 2. **False alarms on the damage map.** The review queue that works leaves predicted
    damage unchecked, and on val only 21% of it is real. Is that acceptable for the use
    you have in mind, or should part of the review budget go to the map?
-3. **When to open the test set.** Not while settings are still being compared. If item 1
-   is settled as "accept the gap", the test set can be opened once, for the base
-   ensemble and the review queue as they are now.
+3. ~~When to open the test set.~~ Done on 2026-10-10. **From here on, any change to the
+   model or the queue cannot be scored on these two disasters** without spoiling them;
+   new modelling work would need new held-out disasters.
 4. Remove the test disasters from `outputs/label_noise/candidates.csv` and
    `docs/label_noise.md`?
 5. Retrain the ordinary siamese and plain stack with 3 seeds under the current rule, so
@@ -236,12 +272,15 @@ $py = ".\.venv\Scripts\python.exe"
 & $py scripts\pre_image_use.py --settings stack_aug stack_aug_samepair siamese_diff_aug
 ```
 
-Next, if you take the recommendation in open decision 1 (nothing below was run):
+The final evaluation (run once on 2026-10-10; the export cannot be run again while
+`TEST_EVALUATION.lock` exists):
 
 ```powershell
-# the one remaining unexplored cheap lever, should you want one more experiment first:
-# a new stop rule would have to be written and committed before training, as in
-# docs/pre_image_plan.md section 4.
-# Otherwise the next real step is the final evaluation, which needs your explicit
-# go-ahead and --final; no command for it is given here on purpose.
+# rebuilds the tables of docs/test_results.md from the saved test predictions; no new evaluation
+& $py scripts\test_results.py --final
+& $py scripts\test_class_mix.py --final      # the exploratory class-mix section
 ```
+
+Next steps are writing, not modelling: the resume bullet and interview notes in
+`docs/risk_coverage.md` still quote val numbers and could now quote the test numbers
+(missed damage 44% to 27% at 20% review on two held-out disasters, random review 35%).

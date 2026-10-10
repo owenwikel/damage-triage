@@ -142,3 +142,14 @@ def test_extra_metrics_match_a_direct_calculation(tmp_path):
     groups = tr.split_groups(table, "val")
     assert list(groups) == ["val: hurricane-florence", "val: midwest-flooding", "val: both disasters"]
     assert len(groups["val: both disasters"]) == 200
+
+
+def test_exploratory_class_mix_needs_final_and_recombines_correctly():
+    import test_class_mix as tcm
+    with pytest.raises(TestSplitError):
+        tcm.main([])                                     # no --final: nothing is read
+    # per-class rates recombined with their own mix give back the overall rate
+    rates = {"minor-damage": 0.6, "major-damage": 0.3, "destroyed": 0.1}
+    mix = {"minor-damage": 10, "major-damage": 30, "destroyed": 60}
+    assert tcm.standardised(rates, mix) == pytest.approx(0.06 + 0.09 + 0.06)
+    assert tcm.standardised(rates, {k: 1 for k in mix}) == pytest.approx(1 / 3)

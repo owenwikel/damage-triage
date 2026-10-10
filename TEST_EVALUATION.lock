@@ -1,0 +1,27 @@
+{
+  "status": "completed",
+  "started": "2026-10-10T08:53:08",
+  "git_commit": "b99969e02b0048e0760f55a084f800f4f101ba66",
+  "protocol": "test_protocol.md",
+  "runs": [
+    "stack_aug_s0",
+    "stack_aug_s1",
+    "stack_aug_s2"
+  ],
+  "cache_dir": "C:\\Users\\wikel\\dev\\xbd-data\\crops_test_final",
+  "files": {
+    "stack_aug_s0": {
+      "rows": 45167,
+      "sha256": "74c014254086b1b2d3679fc7d6e310f64871f5356a348dc7cad040dd646ab739"
+    },
+    "stack_aug_s1": {
+      "rows": 45167,
+      "sha256": "144feeab6751f565b95d0eb1250c4c914d00fae13a6c91ed6504f7dc197ab433"
+    },
+    "stack_aug_s2": {
+      "rows": 45167,
+      "sha256": "ec2b220631077ae084be822f058f8dc2db278260e2f740ed535875c23d1d6698"
+    }
+  },
+  "completed": "2026-10-10T08:54:36"
+}

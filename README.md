@@ -4,11 +4,58 @@ Building damage assessment on the xBD dataset, with a review queue: classify eac
 building as no-damage / minor / major / destroyed from a before and an after satellite
 image, and decide which buildings a person should look at.
 
-**Every number here is from validation data. The test set (hurricane-michael,
-santa-rosa-wildfire) has never been loaded or evaluated;** the code refuses to load it
-without `--final` (`src/split.py`).
+The project is finished: the held-out test set (hurricane-michael,
+santa-rosa-wildfire) was evaluated **once**, on 2026-10-10, under a protocol committed
+beforehand. Those numbers come first below and are labelled **test**. Everything after
+them is from validation data and is labelled val or val-tiles.
 
 Current state in one page: [PROJECT_STATE.md](PROJECT_STATE.md).
+
+## Final held-out result (test)
+
+Two disasters that took no part in training, in choosing checkpoints or in any design
+decision. Model, review queue and review rate were fixed in
+[docs/test_protocol.md](docs/test_protocol.md) before the test set was touched; the
+export is locked against a second run (`TEST_EVALUATION.lock`). Full tables and reading:
+[docs/test_results.md](docs/test_results.md).
+
+The model is an ensemble of three ResNet-18 models. A person reviews 20% of the
+buildings: only ones the model calls no-damage, the most doubtful first. *Missed-damage
+rate* = of all truly damaged buildings, the share that nobody reviews and the model
+calls no-damage. Brackets: 95% intervals from 1000 bootstrap resamples of whole tiles.
+
+| **test**, 20% review | hurricane-michael | santa-rosa-wildfire | both |
+|---|---|---|---|
+| missed-damage rate, nobody reviewed | 0.614 (0.590-0.637) | 0.074 (0.056-0.096) | 0.441 (0.403-0.482) |
+| missed-damage rate, 20% random review | 0.491 | 0.059 | 0.353 |
+| missed-damage rate, the queue in random order | 0.449 | 0.050 | 0.315 |
+| **missed-damage rate, doubtful no-damage first** | **0.390 (0.368-0.411)** | **0.026 (0.018-0.038)** | **0.272 (0.241-0.303)** |
+| accuracy on accepted buildings | 0.599 | 0.828 | 0.686 (0.667-0.707) |
+| macro-F1 on accepted buildings | 0.392 | 0.456 | 0.512 (0.499-0.524) |
+| share of predicted damage that is real | 0.526 | 0.670 | 0.593 (0.551-0.637) |
+| accuracy with nobody reviewed / always "no-damage" | 0.601 / 0.650 | 0.849 / 0.731 | 0.695 / 0.681 |
+
+![test: miss rate against review rate](docs/figures/test_risk_coverage_miss_rate.png)
+
+(All three panels are **test**.)
+
+Plainly:
+
+- **The review queue held up.** In both test disasters it beats random review and the
+  same queue in random order, outside the bootstrap intervals. Combined it cuts missed
+  damage from 44% to 27% at a 20% review rate (random review: 35%).
+- **It does not make the result safe.** 27% of damaged buildings are still accepted as
+  undamaged; in hurricane-michael 39%.
+- **The classifier does not transfer reliably.** On santa-rosa-wildfire (a wildfire, like
+  one training disaster) it works about as well as on the training disasters. On
+  hurricane-michael it is less accurate than always answering "no-damage" and calls
+  61% of the damaged buildings undamaged; it finds 21% of the minor-damage and 14% of
+  the major-damage buildings there.
+- The pooled macro-F1 (0.496 with nobody reviewed) is higher than in either disaster
+  alone (0.370, 0.458) and flatters the model; read the per-disaster numbers.
+- Test has another class mix than validation (far more minor-damage and destroyed).
+  Once that is accounted for, the test miss rate is about what val predicted
+  ([docs/test_results.md](docs/test_results.md), "Compared with validation").
 
 ## The two validation sets
 
@@ -22,7 +69,10 @@ Caveat that applies to every val number: **val helped choose each model's checkp
 epochs), and settings were compared on val. val is therefore somewhat optimistic as an
 estimate for a truly new disaster.
 
-## Headline result: a review queue for buildings called "no-damage"
+## Validation result: a review queue for buildings called "no-damage"
+
+(This section and the ones below are **validation**, the basis on which the queue was
+chosen before the test set was opened.)
 
 The model is an ensemble of three ResNet-18 models (pre and post image stacked into 6
 channels, strong augmentation, seeds 0-2). A person can review a share of the
@@ -118,8 +168,9 @@ All settings, with spread over seeds: [docs/results.md](docs/results.md).
   `uncertainty.py`, `triage.py`
 - `scripts/`: `build_crops.py`, `export_predictions.py`, `make_results.py`,
   `gap_diagnosis.py`, `calibrate_ensemble.py`, `risk_coverage.py`, `error_analysis.py`,
-  `demo_figures.py`, `pre_image_use.py`, `stop_rule.py`, `candidate_report.py`, plus the
-  data-exploration scripts
+  `demo_figures.py`, `pre_image_use.py`, `stop_rule.py`, `candidate_report.py`, the
+  final-evaluation scripts (`export_test_predictions.py`, `test_results.py`,
+  `test_class_mix.py`), plus the data-exploration scripts
 - `configs/`: training configs
 - `splits/split_v1.csv`: the split (source of truth)
 - `docs/`: start with [WALKTHROUGH.md](docs/WALKTHROUGH.md) (study guide to the modelling
@@ -128,7 +179,8 @@ All settings, with spread over seeds: [docs/results.md](docs/results.md).
   [why](docs/split_decision.md). Model: [results](docs/results.md),
   [gap diagnosis](docs/gap_diagnosis.md), [uncertainty plan](docs/uncertainty_plan.md),
   [calibration](docs/calibration_results.md), [risk-coverage](docs/risk_coverage.md),
-  [pre-image experiments](docs/pre_image_plan.md), [error analysis](docs/error_analysis.md)
+  [pre-image experiments](docs/pre_image_plan.md), [error analysis](docs/error_analysis.md).
+  Final evaluation: [test protocol](docs/test_protocol.md), [test results](docs/test_results.md)
 - `runs/`: checkpoints, logs and predictions (not in git)
 - `outputs/`: generated artifacts (not in git, except `outputs/demo/`)
 - `tests/`: test suite (synthetic data; no dataset or GPU needed)
@@ -174,6 +226,20 @@ foreach ($c in "stack_aug_histmatch", "stack_aug_pernorm", "stack_aug_samepair",
 On an 8 GB laptop GPU with 6 loader workers: about 15 minutes and 17.5 GB of RAM per
 stack run (GPU peak 4.1 GB), about 22 minutes and 20.5 GB per siamese run (GPU peak
 6.8 GB). None of these commands touches the test set.
+
+The final evaluation is **not** part of "reproduce": it was run once and
+`TEST_EVALUATION.lock` stops `scripts\export_test_predictions.py` from running again.
+The tables of `docs/test_results.md` can be rebuilt from the saved test predictions
+(`outputs/predictions_test/`, not in git) with
+`& $py scripts\test_results.py --final` and `& $py scripts\test_class_mix.py --final`;
+that recomputes the same numbers and evaluates nothing new. The commands that were run,
+for the record:
+
+```powershell
+& $py scripts\build_crops.py --data-dir $data --final --parts test --out "$data\crops_test_final"
+& $py scripts\export_test_predictions.py --final --cache-dir "$data\crops_test_final"
+& $py scripts\test_results.py --final
+```
 
 ## Setup
 
