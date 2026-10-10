@@ -67,8 +67,8 @@ Plainly:
   alone (0.370, 0.458) and flatters the model; read the per-disaster numbers.
 - Test has another class mix than validation (far more minor-damage and destroyed).
   Once that is accounted for, the test miss rate is about what val predicted
-  ([docs/test_results.md](docs/test_results.md), "Compared with validation"). (class by
-  class the movements differ and cancel in the total)
+  ([docs/test_results.md](docs/test_results.md), "Compared with validation") (class by
+  class the movements differ and cancel in the total).
 
 ## The two validation sets
 
