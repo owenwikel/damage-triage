@@ -67,7 +67,8 @@ Plainly:
   alone (0.370, 0.458) and flatters the model; read the per-disaster numbers.
 - Test has another class mix than validation (far more minor-damage and destroyed).
   Once that is accounted for, the test miss rate is about what val predicted
-  ([docs/test_results.md](docs/test_results.md), "Compared with validation").
+  ([docs/test_results.md](docs/test_results.md), "Compared with validation"). (class by
+  class the movements differ and cancel in the total)
 
 ## The two validation sets
 
@@ -259,5 +260,7 @@ See `SETUP_NOTES.md` for environment setup details.
 
 ## Built with
 
-Claude Code wrote much of the code under my direction. I defined the project, the
-split, the stop rules and the test protocol, and analysed the results.
+Claude Code wrote most of the code and first drafts of the docs under my direction, and
+Claude (chat) advised on the design, including the split, the stop rules and the test
+protocol. I set the goal, directed each stage, committed the rules before the test set
+was opened, and reviewed the results.
