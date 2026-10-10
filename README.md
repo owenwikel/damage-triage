@@ -24,12 +24,24 @@ buildings: only ones the model calls no-damage, the most doubtful first. *Missed
 rate* = of all truly damaged buildings, the share that nobody reviews and the model
 calls no-damage. Brackets: 95% intervals from 1000 bootstrap resamples of whole tiles.
 
+Missed-damage rate, per disaster (**test**):
+
+| | hurricane-michael | santa-rosa-wildfire | both |
+|---|---|---|---|
+| nobody reviewed | 0.614 (0.590-0.637) | 0.074 (0.056-0.096) | 0.441 (0.403-0.482) |
+| 20% reviewed at random | 0.491 | 0.059 | 0.353 |
+| 20%: the queue in random order | 0.449 (0.427-0.469) | 0.050 (0.038-0.067) | 0.315 (0.283-0.349) |
+| **20%: doubtful no-damage first** | **0.390 (0.368-0.411)** | **0.026 (0.018-0.038)** | **0.272 (0.241-0.303)** |
+
+On hurricane-michael the classifier is worse than always answering "no-damage": accuracy
+0.601 against 0.650. The pooled drop from 44% to 27% is dominated by hurricane-michael,
+which has about two thirds of the damaged test buildings (9,821 of 14,425) and nearly
+all of the missed ones.
+
+The other protocol metrics:
+
 | **test**, 20% review | hurricane-michael | santa-rosa-wildfire | both |
 |---|---|---|---|
-| missed-damage rate, nobody reviewed | 0.614 (0.590-0.637) | 0.074 (0.056-0.096) | 0.441 (0.403-0.482) |
-| missed-damage rate, 20% random review | 0.491 | 0.059 | 0.353 |
-| missed-damage rate, the queue in random order | 0.449 | 0.050 | 0.315 |
-| **missed-damage rate, doubtful no-damage first** | **0.390 (0.368-0.411)** | **0.026 (0.018-0.038)** | **0.272 (0.241-0.303)** |
 | accuracy on accepted buildings | 0.599 | 0.828 | 0.686 (0.667-0.707) |
 | macro-F1 on accepted buildings | 0.392 | 0.456 | 0.512 (0.499-0.524) |
 | share of predicted damage that is real | 0.526 | 0.670 | 0.593 (0.551-0.637) |
@@ -244,3 +256,8 @@ for the record:
 ## Setup
 
 See `SETUP_NOTES.md` for environment setup details.
+
+## Built with
+
+Claude Code wrote much of the code under my direction. I defined the project, the
+split, the stop rules and the test protocol, and analysed the results.
