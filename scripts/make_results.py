@@ -45,6 +45,9 @@ SETTINGS = {
     "stack_aug": "base: stack, strong augmentation",
     "stack_aug_pernorm": "base + per-image normalisation",
     "stack_aug_histmatch": "base + post colours histogram-matched to pre",
+    # The pre-image experiments (docs/pre_image_plan.md).
+    "stack_aug_samepair": "base + same-image training pairs",
+    "siamese_diff_aug": "siamese, difference-only head, strong augmentation",
 }
 SINGLE, ENSEMBLE = "max prob (temp. scaled)", "ensemble"
 plt.rcParams.update({"figure.facecolor": SURFACE, "axes.facecolor": SURFACE,
@@ -320,14 +323,20 @@ def main():
             ens_rows.append(e)
     base = settings[base_name]
     L += ["## 2. Settings compared: mean ± spread over seeds\n",
-          "Every setting is the stack ResNet-18 with the strong augmentation, trained "
-          f"with seeds {', '.join(str(s) for s in args.seeds)}; only the preprocessing "
-          "differs (`src/dataset.py`):\n",
+          "Every setting uses the strong augmentation and is trained with seeds "
+          f"{', '.join(str(s) for s in args.seeds)}. The base is the stack ResNet-18; each "
+          "other setting changes one thing (settings without finished runs are left out):\n",
           "- **per-image normalisation**: each image is shifted and scaled by its own "
           "channel means and standard deviations instead of ImageNet's fixed ones, which "
-          "removes overall brightness, contrast and colour cast;",
+          "removes overall brightness, contrast and colour cast (`src/dataset.py`);",
           "- **histogram matching**: the post image is recoloured so that each channel "
-          "has the pre image's distribution of values.\n",
+          "has the pre image's distribution of values (`src/dataset.py`);",
+          "- **same-image training pairs**: a quarter of the training examples show one of "
+          "the building's two images twice, labelled no-damage, to make the model compare "
+          "(`docs/pre_image_plan.md`, candidate A);",
+          "- **siamese, difference-only head**: another architecture, whose classifier "
+          "sees only post features minus pre features (`src/model_diff.py`; "
+          "`docs/pre_image_plan.md`, candidate B).\n",
           "Single models (each seed on its own):\n",
           df_to_markdown(pd.DataFrame(rows), index=False) + "\n"]
     if ens_rows:

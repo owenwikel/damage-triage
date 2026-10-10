@@ -156,6 +156,11 @@ def build_model(arch, pretrained=True, dropout=0.3):
         return SiameseNet(pretrained, dropout)
     if arch == "stack":
         return StackNet(pretrained, dropout)
+    if arch == "siamese_diff":
+        # Experimental (docs/pre_image_plan.md, candidate B). Imported here, not at the
+        # top: src/model_diff.py itself imports from this file.
+        from src.model_diff import SiameseDiffNet
+        return SiameseDiffNet(pretrained, dropout)
     raise ValueError(f"Unknown arch {arch!r}; choose 'siamese' or 'stack'")
 
 
