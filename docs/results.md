@@ -24,10 +24,12 @@ Majority-class accuracy is high because most buildings are undamaged; its macro-
 
 ## 2. Settings compared: mean ± spread over seeds
 
-Every setting is the stack ResNet-18 with the strong augmentation, trained with seeds 0, 1, 2; only the preprocessing differs (`src/dataset.py`):
+Every setting uses the strong augmentation and is trained with seeds 0, 1, 2. The base is the stack ResNet-18; each other setting changes one thing (settings without finished runs are left out):
 
-- **per-image normalisation**: each image is shifted and scaled by its own channel means and standard deviations instead of ImageNet's fixed ones, which removes overall brightness, contrast and colour cast;
-- **histogram matching**: the post image is recoloured so that each channel has the pre image's distribution of values.
+- **per-image normalisation**: each image is shifted and scaled by its own channel means and standard deviations instead of ImageNet's fixed ones, which removes overall brightness, contrast and colour cast (`src/dataset.py`);
+- **histogram matching**: the post image is recoloured so that each channel has the pre image's distribution of values (`src/dataset.py`);
+- **same-image training pairs**: a quarter of the training examples show one of the building's two images twice, labelled no-damage, to make the model compare (`docs/pre_image_plan.md`, candidate A);
+- **siamese, difference-only head**: another architecture, whose classifier sees only post features minus pre features (`src/model_diff.py`; `docs/pre_image_plan.md`, candidate B).
 
 Single models (each seed on its own):
 
@@ -36,6 +38,8 @@ Single models (each seed on its own):
 | base: stack, strong augmentation | `stack_aug_s*` (3 seeds) | 0.870 ± 0.001 (0.869-0.872) | 0.694 ± 0.002 (0.693-0.697) | 0.617 ± 0.021 (0.604-0.641) | 0.304 ± 0.005 (0.299-0.310) |
 | base + per-image normalisation | `stack_aug_pernorm_s*` (3 seeds) | 0.866 ± 0.000 (0.866-0.866) | 0.681 ± 0.002 (0.679-0.683) | 0.497 ± 0.030 (0.477-0.531) | 0.248 ± 0.011 (0.237-0.260) |
 | base + post colours histogram-matched to pre | `stack_aug_histmatch_s*` (3 seeds) | 0.862 ± 0.001 (0.860-0.863) | 0.672 ± 0.001 (0.672-0.673) | 0.571 ± 0.020 (0.549-0.586) | 0.271 ± 0.009 (0.261-0.279) |
+| base + same-image training pairs | `stack_aug_samepair_s*` (3 seeds) | 0.868 ± 0.001 (0.867-0.870) | 0.688 ± 0.002 (0.687-0.690) | 0.554 ± 0.019 (0.532-0.568) | 0.274 ± 0.013 (0.260-0.286) |
+| siamese, difference-only head, strong augmentation | `siamese_diff_aug_s*` (3 seeds) | 0.873 ± 0.001 (0.872-0.875) | 0.695 ± 0.003 (0.692-0.697) | 0.537 ± 0.068 (0.478-0.611) | 0.268 ± 0.020 (0.254-0.291) |
 
 Ensemble of each setting's seeds (probabilities averaged; one number per setting, so no spread):
 
@@ -44,9 +48,13 @@ Ensemble of each setting's seeds (probabilities averaged; one number per setting
 | base: stack, strong augmentation | 0.876 | 0.705 | 0.640 | 0.313 |
 | base + per-image normalisation | 0.871 | 0.690 | 0.512 | 0.246 |
 | base + post colours histogram-matched to pre | 0.867 | 0.683 | 0.590 | 0.276 |
+| base + same-image training pairs | 0.872 | 0.694 | 0.573 | 0.281 |
+| siamese, difference-only head, strong augmentation | 0.878 | 0.703 | 0.566 | 0.283 |
 
 - **base + per-image normalisation** against the base, on val: macro-F1 -0.056, accuracy -0.120 (difference of means); on val-tiles macro-F1 -0.013. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges do not overlap: with 3 and 3 seeds, that is a difference worth taking seriously.
 - **base + post colours histogram-matched to pre** against the base, on val: macro-F1 -0.034, accuracy -0.046 (difference of means); on val-tiles macro-F1 -0.022. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges do not overlap: with 3 and 3 seeds, that is a difference worth taking seriously.
+- **base + same-image training pairs** against the base, on val: macro-F1 -0.030, accuracy -0.064 (difference of means); on val-tiles macro-F1 -0.006. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges do not overlap: with 3 and 3 seeds, that is a difference worth taking seriously.
+- **siamese, difference-only head, strong augmentation** against the base, on val: macro-F1 -0.036, accuracy -0.080 (difference of means); on val-tiles macro-F1 +0.001. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges overlap: mixed evidence.
 
 For scale: always answering no-damage scores 0.878 accuracy on val. The best setting's mean val accuracy is 0.617 (`stack_aug`), still below it.
 
@@ -74,6 +82,14 @@ The triage idea needs the model to be *less sure when it is wrong*, most of all 
 | base + post colours histogram-matched to pre | val-tiles | ensemble | 0.867 | 0.874 | 0.905 | 0.730 | 0.974 |
 | base + post colours histogram-matched to pre | val | single (3 seeds) | 0.571 ± 0.020 (0.549-0.586) | 0.654 ± 0.003 (0.652-0.658) | 0.728 ± 0.008 (0.719-0.733) | 0.305 ± 0.010 (0.293-0.312) | 0.696 ± 0.021 (0.673-0.709) |
 | base + post colours histogram-matched to pre | val | ensemble | 0.590 | 0.643 | 0.735 | 0.315 | 0.709 |
+| base + same-image training pairs | val-tiles | single (3 seeds) | 0.868 ± 0.001 (0.867-0.870) | 0.873 ± 0.002 (0.871-0.874) | 0.898 ± 0.002 (0.897-0.900) | 0.729 ± 0.011 (0.717-0.739) | 0.968 ± 0.002 (0.967-0.971) |
+| base + same-image training pairs | val-tiles | ensemble | 0.872 | 0.877 | 0.898 | 0.732 | 0.970 |
+| base + same-image training pairs | val | single (3 seeds) | 0.554 ± 0.019 (0.532-0.568) | 0.640 ± 0.004 (0.635-0.644) | 0.727 ± 0.007 (0.719-0.732) | 0.298 ± 0.009 (0.287-0.304) | 0.687 ± 0.016 (0.669-0.700) |
+| base + same-image training pairs | val | ensemble | 0.573 | 0.626 | 0.728 | 0.305 | 0.698 |
+| siamese, difference-only head, strong augmentation | val-tiles | single (3 seeds) | 0.873 ± 0.001 (0.872-0.875) | 0.876 ± 0.000 (0.875-0.876) | 0.901 ± 0.000 (0.901-0.902) | 0.741 ± 0.004 (0.736-0.744) | 0.970 ± 0.002 (0.968-0.972) |
+| siamese, difference-only head, strong augmentation | val-tiles | ensemble | 0.878 | 0.880 | 0.903 | 0.752 | 0.969 |
+| siamese, difference-only head, strong augmentation | val | single (3 seeds) | 0.537 ± 0.068 (0.478-0.611) | 0.614 ± 0.013 (0.604-0.629) | 0.656 ± 0.037 (0.627-0.698) | 0.264 ± 0.034 (0.237-0.303) | 0.622 ± 0.048 (0.583-0.676) |
+| siamese, difference-only head, strong augmentation | val | ensemble | 0.566 | 0.585 | 0.653 | 0.267 | 0.619 |
 
 **Reading it, for the base setting (`stack_aug`), single model:**
 
@@ -221,5 +237,11 @@ Every run behind sections 2-5, at the epoch that was kept.
 | stack_aug_histmatch_s0 | 10 of 10 | 0.863 | 0.673 | 0.549 | 0.261 | 0.465 | 6 | 83 | 16.530 | 22.010 | 4.076 |
 | stack_aug_histmatch_s1 | 10 of 10 | 0.860 | 0.672 | 0.578 | 0.279 | 0.471 | 6 | 87 | 16.530 | 21.270 | 4.076 |
 | stack_aug_histmatch_s2 | 9 of 10 | 0.863 | 0.672 | 0.586 | 0.273 | 0.468 | 6 | 87 | 16.530 | 21.690 | 4.076 |
+| stack_aug_samepair_s0 | 10 of 10 | 0.870 | 0.690 | 0.561 | 0.286 | 0.487 | 6 | 65 | 17.010 | 20.680 | 4.076 |
+| stack_aug_samepair_s1 | 10 of 10 | 0.868 | 0.687 | 0.568 | 0.276 | 0.478 | 6 | 64 | 17.010 | 20.850 | 4.076 |
+| stack_aug_samepair_s2 | 10 of 10 | 0.867 | 0.689 | 0.532 | 0.260 | 0.474 | 6 | 64 | 17.130 | 20.570 | 4.076 |
+| siamese_diff_aug_s0 | 10 of 10 | 0.875 | 0.697 | 0.522 | 0.259 | 0.477 | 6 | 109 | 20.490 | 20.270 | 6.771 |
+| siamese_diff_aug_s1 | 10 of 10 | 0.873 | 0.696 | 0.478 | 0.254 | 0.475 | 6 | 109 | 20.490 | 20.150 | 6.771 |
+| siamese_diff_aug_s2 | 10 of 10 | 0.872 | 0.692 | 0.611 | 0.291 | 0.490 | 6 | 108 | 20.490 | 20.240 | 6.771 |
 
 Per-epoch metrics and memory are in `runs/<run>/log.jsonl` (not in git).
