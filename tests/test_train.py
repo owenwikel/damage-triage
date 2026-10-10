@@ -137,3 +137,17 @@ def test_overfit_mode_trains_on_a_subset_and_skips_validation(tmp_path):
     assert list(summary["best"]) == ["overfit-subset"]
     assert summary["best"]["overfit-subset"]["n"] == 8
     assert not (tmp_path / "runs" / "sanity" / "preds_val.npz").exists()
+
+
+def test_same_pair_option_reaches_the_training_set_only(tmp_path):
+    cache = write_fake_cache(tmp_path / "cache", n=24)
+    cfg = Config(arch="stack", augment="strong", same_pair_prob=0.25, cache_dir=str(cache),
+                 runs_dir=str(tmp_path / "runs"), epochs=1, batch_size=8, eval_batch_size=8,
+                 pretrained=False, num_workers=0, amp=False)
+    summary = run(cfg)
+    assert summary["run_name"] == "stack_aug_samepair_s0"
+    assert summary["same_pair_prob"] == 0.25
+    # class weights come from the true labels (6 of each class), so they are all equal
+    assert summary["class_weights"] == pytest.approx([1.0] * 4)
+    # the evaluation sets are scored on their true labels: all four classes are present
+    assert all(r is not None for r in summary["best"]["val"]["recall"])

@@ -75,6 +75,7 @@ class Config:
     num_workers: int = 2             # background processes that prepare training batches
     eval_num_workers: int = 0        # 0 = evaluation batches are prepared in the main process
     overfit: int = 0                 # N > 0: sanity check, train on N crops only
+    same_pair_prob: float = 0.0      # > 0: same-image training pairs (src/dataset.py, same_pair)
 
 
 # --------------------------------------------------------------------------------------
@@ -383,6 +384,7 @@ def run(cfg):
     cfg.run_name = cfg.run_name or (cfg.arch + ("_aug" if cfg.augment == "strong" else "")
                                     + ("_pernorm" if cfg.normalize == "per_image" else "")
                                     + ("_histmatch" if cfg.match_hist else "")
+                                    + ("_samepair" if cfg.same_pair_prob > 0 else "")
                                     + f"_s{cfg.seed}")
     out_dir = Path(cfg.runs_dir) / cfg.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -391,7 +393,9 @@ def run(cfg):
 
     # ---- data ----
     train_set = CropDataset(cfg.cache_dir, "train", augment=False if cfg.overfit else cfg.augment,
-                            normalize=cfg.normalize, match_hist=cfg.match_hist)
+                            normalize=cfg.normalize, match_hist=cfg.match_hist,
+                            same_pair=0.0 if cfg.overfit else cfg.same_pair_prob)
+    # The true labels: class weights do not count the same-image pairs' altered labels.
     train_labels = train_set.labels
     eval_sets = {}
     if cfg.overfit:
@@ -533,7 +537,7 @@ def run(cfg):
         "run_peak_private_gb": max(h["memory"]["run_private_gb"] for h in history),
         "num_workers": cfg.num_workers, "augment": cfg.augment,
         "normalize": cfg.normalize, "match_hist": cfg.match_hist,
-        "select_window": cfg.select_window,
+        "select_window": cfg.select_window, "same_pair_prob": cfg.same_pair_prob,
         "best_selection_score": None if cfg.overfit else best,
         "class_weights": weights.cpu().tolist(), "class_names": CLASS_NAMES,
         "best": final, "history": history,

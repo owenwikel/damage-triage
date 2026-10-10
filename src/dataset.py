@@ -214,6 +214,9 @@ class CropDataset(Dataset):
     normalize   "imagenet" (default) or "per_image"; see ``normalize_image``.
     match_hist  True: recolour the post image to the pre image's colour distribution
                 (``match_histogram``) before normalising.
+    same_pair   0 (default, off) or a probability. For training only: with this
+                probability an example is turned into a "nothing happened" pair, see
+                ``__getitem__``. Experiment of docs/pre_image_plan.md.
 
     ``normalize`` and ``match_hist`` change what the model sees, so they must be the same
     in training and in every later evaluation of that model. ``from_config`` builds the
@@ -221,12 +224,15 @@ class CropDataset(Dataset):
     """
 
     def __init__(self, cache_dir, part, augment=False, final=False, normalize="imagenet",
-                 match_hist=False):
+                 match_hist=False, same_pair=0.0):
         require_final(part, final)          # raises TestSplitError for "test" by default
         if normalize not in ("imagenet", "per_image"):
             raise ValueError(f"Unknown normalisation {normalize!r}; use 'imagenet' or 'per_image'")
         self.normalize = normalize
         self.match_hist = bool(match_hist)
+        if not 0.0 <= same_pair <= 1.0:
+            raise ValueError(f"same_pair is a probability, got {same_pair!r}")
+        self.same_pair = float(same_pair)
         self.cache_dir = Path(cache_dir)
         self.part = part
         self.augment = "base" if augment is True else augment
@@ -258,6 +264,22 @@ class CropDataset(Dataset):
         if self._pre is None:
             self._open()
         pre, post = self._to_tensor(self._pre[i]), self._to_tensor(self._post[i])
+        label = int(self.labels[i])
+        # "Same-image pairs" (docs/pre_image_plan.md, candidate A). Sometimes both inputs
+        # are made from ONE of the building's two images, and the label becomes
+        # no-damage: nothing can have happened between a picture and itself. A destroyed
+        # building's (pre, post) must then be called destroyed and its (post, post)
+        # no-damage, with the same second input, so the model has to look at the first.
+        # The augmentation below still treats the two copies separately (own colours,
+        # second copy shifted), so they are not pixel-for-pixel equal.
+        # The first test keeps the base path untouched: when the option is off, no
+        # random number is drawn here, so everything after it is exactly as before.
+        if self.same_pair > 0 and torch.rand(1).item() < self.same_pair:
+            if torch.rand(1).item() < 0.5:
+                post = pre.clone()       # (pre, pre)
+            else:
+                pre = post.clone()       # (post, post)
+            label = 0
         if self.augment:
             pre, post = augment_pair(pre, post, self.augment)
         if self.match_hist:
@@ -267,7 +289,7 @@ class CropDataset(Dataset):
         # A flipped or rotated tensor is a "view" that reads the same memory in a
         # different order; normalize_image makes it contiguous first (see _to_tensor).
         return (normalize_image(pre, self.normalize), normalize_image(post, self.normalize),
-                int(self.labels[i]))
+                label)
 
     @classmethod
     def from_config(cls, config, part, augment=False, final=False):

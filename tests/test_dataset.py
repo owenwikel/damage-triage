@@ -174,3 +174,53 @@ def test_works_with_a_dataloader(cache):
     loader = torch.utils.data.DataLoader(CropDataset(cache, "train"), batch_size=8)
     pre, post, label = next(iter(loader))
     assert pre.shape == (8, 3, 128, 128) and label.dtype == torch.int64
+
+
+# ---- same-image pairs (docs/pre_image_plan.md) -----------------------------------------
+
+def test_same_pair_always_on_gives_identical_inputs_and_no_damage(tmp_path):
+    from conftest import write_fake_cache
+    from src.dataset import CropDataset
+    cache = write_fake_cache(tmp_path / "cache", n=16)
+    plain = CropDataset(cache, "train")
+    paired = CropDataset(cache, "train", same_pair=1.0)       # no augmentation: exact copies
+    torch.manual_seed(0)
+    sources = set()
+    for i in range(16):
+        pre, post, label = paired[i]
+        real_pre, real_post, _ = plain[i]
+        assert label == 0 and torch.equal(pre, post)
+        sources.add("pre" if torch.equal(pre, real_pre) else "post")
+        assert torch.equal(pre, real_pre) or torch.equal(pre, real_post)
+    assert sources == {"pre", "post"}                          # both kinds occur
+
+
+def test_same_pair_probability_and_strong_augmentation(tmp_path):
+    from conftest import write_fake_cache
+    from src.dataset import CropDataset
+    cache = write_fake_cache(tmp_path / "cache", n=16)
+    data = CropDataset(cache, "train", augment="strong", same_pair=0.25)
+    torch.manual_seed(0)
+    # Labels cycle 0..3, so item 3 is "destroyed": it turns to 0 only as a same-image pair.
+    labels = [data[3][2] for _ in range(400)]
+    assert set(labels) == {0, 3}
+    assert 0.18 < labels.count(0) / 400 < 0.32
+    # with augmentation the two copies are no longer identical
+    always = CropDataset(cache, "train", augment="strong", same_pair=1.0)
+    pre, post, _ = always[3]
+    assert not torch.equal(pre, post)
+
+
+def test_same_pair_off_draws_no_random_numbers_and_rejects_bad_values(tmp_path):
+    from conftest import write_fake_cache
+    from src.dataset import CropDataset
+    cache = write_fake_cache(tmp_path / "cache", n=8)
+    torch.manual_seed(5)
+    CropDataset(cache, "train", same_pair=0.0)[0]
+    after = torch.rand(1).item()
+    torch.manual_seed(5)
+    assert torch.rand(1).item() == after          # nothing was drawn in between
+    with pytest.raises(ValueError):
+        CropDataset(cache, "train", same_pair=1.5)
+    # evaluation datasets built from a run's config never use it
+    assert CropDataset.from_config({"cache_dir": str(cache), "same_pair_prob": 0.25}, "val").same_pair == 0.0
