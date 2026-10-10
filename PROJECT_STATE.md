@@ -1,4 +1,4 @@
-# Project state (2026-10-09)
+# Project state (2026-10-10)
 
 The one place that says where the project stands. `SESSION_REPORT.md` is the log of what
 happened in each session; `docs/results.md` holds the full tables.
@@ -32,9 +32,55 @@ goes through `src/split.py`, which refuses the test part without `final=True`.
   far better on misses: 0.022 on val-tiles and 0.185 on val at 20% review. Its cost:
   buildings predicted damaged are never reviewed, and on val only 21% of them are
   truly damaged.
-- Untracked `risk_coverage.ipynb` in the repo root is not part of this work.
-- Tests: 145 pass, 1 skipped (the optional real-data test, which reads test tiles' label
+- **Pre-image experiments (overnight session, 2026-10-10): both DROPPED.** Two changes
+  meant to make the model compare before and after were trained with 3 seeds each and
+  judged by a stop rule committed before training (`docs/pre_image_plan.md`,
+  `scripts/stop_rule.py`). Neither met it; both are worse than the base on val. The
+  base model stays the model of record. Details in the next section.
+- `README.md` is rewritten to the current state; val-only demo figures are in
+  `docs/figures/demo_val_*.jpg` (`docs/demo_val.md`).
+- Tests: 162 pass, 1 skipped (the optional real-data test, which reads test tiles' label
   files and is deliberately not run).
+
+## The overnight session of 2026-10-10
+
+What ran, in order (all validation only; training from 00:15 to 02:09):
+
+1. **Plan and stop rule**, committed before any training (`7b96b05`). KEEP only if the
+   3-seed mean val macro-F1 rises by at least 0.03 (to 0.334), mean val accuracy does
+   not fall (0.617), and mean val-tiles macro-F1 falls by at most 0.02 (to 0.674).
+2. **Pre-image-use test** (`scripts/pre_image_use.py`): each val building gets the pre
+   image of another building of the same disaster; the drop in macro-F1 is reported.
+   Reference, base model: val 0.304 to 0.254 (drop 0.050), val-tiles drop 0.073.
+3. **Primary, same-image training pairs** (`stack_aug_samepair`, option `same_pair_prob`
+   = 0.25): 3 seeds, about 14 minutes each.
+4. **Backup, siamese with a difference-only head** (`siamese_diff_aug`,
+   `src/model_diff.py`): 3 seeds, about 22 minutes each.
+5. Nothing was kept, so no new exports and no new risk-coverage run;
+   `docs/results.md` was rebuilt with all five settings.
+
+| setting (mean of 3 seeds) | val macro-F1 | val accuracy | val-tiles macro-F1 | pre-image-use drop on val | decision |
+|---|---|---|---|---|---|
+| base `stack_aug` | 0.304 | 0.617 | 0.694 | 0.050 | reference |
+| `stack_aug_samepair` | 0.274 | 0.554 | 0.688 | 0.060 | **DROP**: fails the val macro-F1 and val accuracy conditions |
+| `siamese_diff_aug` | 0.268 | 0.537 | 0.695 | 0.009 | **DROP**: fails the same two |
+
+Why DROP, in words: the rule asked for a clear gain on the unseen disasters, and both
+changes lost about 0.03 macro-F1 and 0.06-0.08 accuracy there while staying level on
+val-tiles. The same-image model does lean on the pre image a little more than the base
+and transfers worse. The difference-only model cannot ignore the pre image, yet on val
+it scores almost the same with another building's pre image (0.259 against 0.268): on
+the unseen disasters the building's own "before" gives it next to nothing.
+
+One finding changes an earlier statement in this file: the base model does **not**
+simply ignore the pre image. Swapping in another building's pre image changes 38% of
+its val answers and costs 0.073 macro-F1 on val-tiles. What `docs/gap_diagnosis.md`
+showed is narrower: replacing the pre image by the post image barely moves val-tiles
+accuracy.
+
+Cost: stack runs 4.1 GB GPU peak and 17.0-17.1 GB RAM per run; siamese runs 6.8 GB GPU
+and 20.5 GB RAM per run (above the 17.5 GB of a base run; the machine kept 20 GB free).
+No run failed; nothing went into `BLOCKERS.md`.
 
 ## Models and checkpoints
 
@@ -59,6 +105,14 @@ somewhat optimistic.
 | `stack_aug_histmatch_s1` | same, seed 1 | 10 of 10 | 0.471 | 0.860 / 0.672 | 0.578 / 0.279 |
 | `stack_aug_histmatch_s2` | same, seed 2 | 9 of 10 | 0.468 | 0.863 / 0.672 | 0.586 / 0.273 |
 | ensemble of the 3 | histogram matching | | | 0.867 / 0.683 | 0.590 / 0.276 |
+| `stack_aug_samepair_s0` | base + same-image training pairs | 10 of 10 | 0.487 | 0.870 / 0.690 | 0.561 / 0.286 |
+| `stack_aug_samepair_s1` | same, seed 1 | 10 of 10 | 0.478 | 0.868 / 0.687 | 0.568 / 0.276 |
+| `stack_aug_samepair_s2` | same, seed 2 | 10 of 10 | 0.474 | 0.867 / 0.689 | 0.532 / 0.260 |
+| ensemble of the 3 | same-image pairs | | | 0.872 / 0.694 | 0.573 / 0.281 |
+| `siamese_diff_aug_s0` | siamese, difference-only head | 10 of 10 | 0.477 | 0.875 / 0.697 | 0.522 / 0.259 |
+| `siamese_diff_aug_s1` | same, seed 1 | 10 of 10 | 0.475 | 0.873 / 0.696 | 0.478 / 0.254 |
+| `siamese_diff_aug_s2` | same, seed 2 | 10 of 10 | 0.490 | 0.872 / 0.692 | 0.611 / 0.291 |
+| ensemble of the 3 | difference-only siamese | | | 0.878 / 0.703 | 0.566 / 0.283 |
 
 The cheap-fix batch is complete (2026-10-09): `stack_aug_pernorm_s2` was retrained from
 the start and the three histogram-matching seeds were trained, all under the rule above.
@@ -94,17 +148,22 @@ run. These two rows are not a fair comparison with the base model.
 - The ensemble is preferred over any single seed because single seeds range from 0.604
   to 0.641 on val and nothing but val labels says which one is good; the ensemble
   reaches the best seed's level and is the best on val-tiles.
-- **What is not established:** that stack beats siamese, or that strong augmentation
-  beats base augmentation. Each was compared on one seed under the old rule, and the
-  gaps were smaller than the seed-to-seed spread.
+- The two pre-image changes (same-image pairs, difference-only siamese) are worse on
+  val and were dropped by the pre-committed stop rule.
+- **What is not established:** that strong augmentation beats base augmentation, or
+  that stack beats the *ordinary* siamese model (`[pre, post, post - pre]` head). Each
+  was compared on one seed under the old rule. The difference-only siamese is a
+  different model and does not settle it, though it is level with the base on
+  val-tiles and worse on val.
 
 ## Saved predictions
 
 | where | what | parts |
 |---|---|---|
-| `outputs/predictions/<run>/<part>.csv` | uid, disaster, tile_id, label, logit_0..3, one row per building; written by `scripts/export_predictions.py` for `stack_aug_s0..2`, `stack_aug_histmatch_s0..2` and `stack_aug_pernorm_s2` (not for `stack_aug_pernorm_s0..1`) | train, val-tiles, val |
+| `outputs/predictions/<run>/<part>.csv` | uid, disaster, tile_id, label, logit_0..3, one row per building; written by `scripts/export_predictions.py` for `stack_aug_s0..2`, `stack_aug_histmatch_s0..2` and `stack_aug_pernorm_s2` (not for `stack_aug_pernorm_s0..1`, and not for the two dropped pre-image settings) | train, val-tiles, val |
 | `runs/<run>/preds_<part>.npz` | logits and labels only, in cache order (no ids); written by training | val-tiles, val |
 | `runs/old_rule/stack_aug_s0/mc_dropout_<part>.npz` | MC-dropout summary of the earlier seed-0 model | val-tiles, val |
+| `outputs/pre_image_use/<setting>.json` | pre-image-use test, per seed | val, val-tiles |
 
 Neither `runs/` nor `outputs/predictions/` is in git. Row counts of the export: 134,660 /
 14,718 / 19,099, equal to the crop cache's label table; the exported val-tiles and val
@@ -114,34 +173,44 @@ for diagnostics only, never for scores or for fitting a temperature.
 
 ## Stale or broken
 
-Nothing is broken: the whole test suite passes, and the test suite that
-`SESSION_REPORT.md` says was not re-run after the last edits of session 3 has now been
-run. Stale:
+Nothing is broken: the whole test suite passes. Stale or to be aware of:
 
-- **`README.md`.** Its results table and bullet points are the old-rule numbers (seeds
-  at 0.61 / 0.66 / 0.76 on val, ensemble 0.709). It says "three uncertainty methods"
-  and describes selection without the 3-epoch window. Its "Reproduce" block trains
-  siamese and plain stack and runs MC dropout, none of which is behind the current
-  results, and omits the per-image runs, `scripts/gap_diagnosis.py` and
-  `scripts/export_predictions.py`. `docs/gap_diagnosis.md` and
-  `docs/uncertainty_plan.md` are not linked.
-- **`SESSION_REPORT.md`** is correct as a log but its lower half describes the old-rule
-  runs; read only the "Session 3" part for current numbers.
+- **`SESSION_REPORT.md`** is the log of 2026-10-01 only. It was not extended for the later
+  sessions; this file and the docs are current.
+- **`docs/gap_diagnosis.md`** says the model "is mostly reading the post image and hardly
+  comparing". The pre-image-use test qualifies that (see above). The document itself
+  was not changed.
+- **`docs/demo.md` and `outputs/demo/`** show the six-tile demo of 2026-10-01 (val and
+  val-tiles tiles of seed 0). Still valid for that model; the README now uses the
+  val-only figures in `docs/figures/`.
+- **`outputs/label_noise/candidates.csv` and `docs/label_noise.md` include the two test
+  disasters.** They come from the first data exploration (2026-10-01), before the split
+  existed, and hold label statistics only (no model output). Code that reads the file
+  now keeps val rows only (`scripts/error_analysis.py`). Worth deciding whether to
+  regenerate both without the test disasters.
 - **`docs/results.md` section 6** calls MC dropout "20 times the prediction cost". It is
   20 passes; measured wall-clock is about 6 times (65 s against 11 s on val), because
   most of a prediction run is loading crops.
-- **`PROJECT_STATE.md` did not exist** before this file.
 
 ## Open decisions
 
-1. Both cheap preprocessing fixes are now tested with 3 seeds and rejected. What next
-   for the val gap?
-2. The model mostly ignores the pre image on the training disasters
-   (`docs/gap_diagnosis.md`). Push it towards comparing before more preprocessing?
-3. Retrain siamese and plain stack with 3 seeds under the current rule, so that the
-   architecture and augmentation choices rest on a fair comparison?
-4. Update `README.md` to the current numbers.
-5. When to open the test set: not yet.
+1. **What next for the val gap?** Four changes are now rejected with 3 seeds each (two
+   colour fixes, two pre-image fixes). Options not yet tried: more context around each
+   building; training on more or different disasters (for example moving a flood
+   disaster from val into training, which costs a val disaster); or accepting the gap
+   and presenting the project as "works within disaster types, with a measured failure
+   on unseen ones". My recommendation is the last, together with item 2.
+2. **False alarms on the damage map.** The review queue that works leaves predicted
+   damage unchecked, and on val only 21% of it is real. Is that acceptable for the use
+   you have in mind, or should part of the review budget go to the map?
+3. **When to open the test set.** Not while settings are still being compared. If item 1
+   is settled as "accept the gap", the test set can be opened once, for the base
+   ensemble and the review queue as they are now.
+4. Remove the test disasters from `outputs/label_noise/candidates.csv` and
+   `docs/label_noise.md`?
+5. Retrain the ordinary siamese and plain stack with 3 seeds under the current rule, so
+   that the architecture and augmentation choices rest on a fair comparison? Low value
+   now: nothing suggests either would change the val picture.
 6. Small ones still open: the batch cap at 512; the 0.5 factor on the stack model's
    copied first-layer weights; loader workers (6 was used in session 3, 17.5 GB RAM per
    run).
@@ -153,4 +222,18 @@ $py = ".\.venv\Scripts\python.exe"
 & $py -m pytest -q
 & $py scripts\export_predictions.py          # train, val-tiles, val; about 5.5 minutes
 & $py scripts\make_results.py                # rebuilds docs/results.md from runs/
+& $py scripts\risk_coverage.py               # the headline table and plots
+& $py scripts\stop_rule.py --candidate stack_aug_samepair    # prints the DROP decision again
+& $py scripts\stop_rule.py --candidate siamese_diff_aug
+& $py scripts\pre_image_use.py --settings stack_aug stack_aug_samepair siamese_diff_aug
+```
+
+Next, if you take the recommendation in open decision 1 (nothing below was run):
+
+```powershell
+# the one remaining unexplored cheap lever, should you want one more experiment first:
+# a new stop rule would have to be written and committed before training, as in
+# docs/pre_image_plan.md section 4.
+# Otherwise the next real step is the final evaluation, which needs your explicit
+# go-ahead and --final; no command for it is given here on purpose.
 ```
