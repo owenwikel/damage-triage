@@ -178,8 +178,13 @@ def main(argv=None):
                     help="crop cache, if it is no longer where the run's config says")
     args = ap.parse_args(argv)
 
-    manifest = {"parts": list(args.parts), "class_names": CLASS_NAMES, "columns": COLUMNS,
-                "runs": {}}
+    manifest = {"class_names": CLASS_NAMES, "columns": COLUMNS, "runs": {}}
+    # Exporting a few more runs later must not forget the ones already exported: start
+    # from the existing manifest and add to (or replace entries in) its "runs".
+    manifest_path = args.out / "manifest.json"
+    if manifest_path.exists():
+        manifest["runs"] = json.loads(manifest_path.read_text(encoding="utf-8")).get("runs", {})
+    exported = 0
     for run_dir in args.runs:
         # metrics.json is the last file a training run writes. Without it the run was
         # interrupted: its best.pt is whatever was best so far, not a selected model.
@@ -190,12 +195,15 @@ def main(argv=None):
         counts = export_run(run_dir, args.out, args.parts, args.batch_size, args.num_workers,
                             args.cache_dir)
         summary = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
-        manifest["runs"][run_dir.name] = {"seed": summary["seed"], "arch": summary["arch"],
-                                          "best_epoch": summary["best_epoch"], "rows": counts}
-    if not manifest["runs"]:
+        entry = manifest["runs"].setdefault(run_dir.name, {"rows": {}})
+        entry.update({"seed": summary["seed"], "arch": summary["arch"],
+                      "best_epoch": summary["best_epoch"]})
+        entry["rows"].update(counts)        # per part, so a one-part export keeps the others
+        exported += 1
+    if not exported:
         raise SystemExit("No finished run among --runs: nothing exported.")
-    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"Wrote {args.out / 'manifest.json'}")
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"Wrote {manifest_path}")
 
 
 if __name__ == "__main__":   # required on Windows if --num-workers > 0 (see src/train.py)

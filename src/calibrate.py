@@ -1,7 +1,7 @@
 """Calibration: make the model's confidence mean what it says.
 
 Usage:
-    .\\.venv\\Scripts\\python.exe -m src.calibrate --run runs\\siamese_s0
+    .\\.venv\\Scripts\\python.exe -m src.calibrate --run runs\\stack_aug_s0
 
 The problem
 -----------

@@ -1,7 +1,7 @@
 """Where is the model wrong, and does its confidence know? -> docs/error_analysis.md
 
 Usage:
-    .\\.venv\\Scripts\\python.exe scripts\\error_analysis.py --run runs\\siamese_s0
+    .\\.venv\\Scripts\\python.exe scripts\\error_analysis.py --run runs\\stack_aug_s0
 
 Uses the saved predictions of one run on val-tiles and val (never test), with confidence
 = top probability after temperature scaling (T fitted on val-tiles, src/calibrate.py).

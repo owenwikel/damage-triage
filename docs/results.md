@@ -34,16 +34,19 @@ Single models (each seed on its own):
 | setting | runs | val-tiles accuracy | val-tiles macro-F1 | val accuracy | val macro-F1 |
 |---|---|---|---|---|---|
 | base: stack, strong augmentation | `stack_aug_s*` (3 seeds) | 0.870 ± 0.001 (0.869-0.872) | 0.694 ± 0.002 (0.693-0.697) | 0.617 ± 0.021 (0.604-0.641) | 0.304 ± 0.005 (0.299-0.310) |
-| base + per-image normalisation | `stack_aug_pernorm_s*` (2 seeds) | 0.866 ± 0.001 (0.866-0.866) | 0.680 ± 0.001 (0.679-0.681) | 0.480 ± 0.004 (0.477-0.483) | 0.242 ± 0.007 (0.237-0.247) |
+| base + per-image normalisation | `stack_aug_pernorm_s*` (3 seeds) | 0.866 ± 0.000 (0.866-0.866) | 0.681 ± 0.002 (0.679-0.683) | 0.497 ± 0.030 (0.477-0.531) | 0.248 ± 0.011 (0.237-0.260) |
+| base + post colours histogram-matched to pre | `stack_aug_histmatch_s*` (3 seeds) | 0.862 ± 0.001 (0.860-0.863) | 0.672 ± 0.001 (0.672-0.673) | 0.571 ± 0.020 (0.549-0.586) | 0.271 ± 0.009 (0.261-0.279) |
 
 Ensemble of each setting's seeds (probabilities averaged; one number per setting, so no spread):
 
 | setting | val-tiles accuracy | val-tiles macro-F1 | val accuracy | val macro-F1 |
 |---|---|---|---|---|
 | base: stack, strong augmentation | 0.876 | 0.705 | 0.640 | 0.313 |
-| base + per-image normalisation | 0.871 | 0.688 | 0.488 | 0.238 |
+| base + per-image normalisation | 0.871 | 0.690 | 0.512 | 0.246 |
+| base + post colours histogram-matched to pre | 0.867 | 0.683 | 0.590 | 0.276 |
 
-- **base + per-image normalisation** against the base, on val: macro-F1 -0.062, accuracy -0.137 (difference of means); on val-tiles macro-F1 -0.014. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges do not overlap: with 3 and 2 seeds, that is a difference worth taking seriously.
+- **base + per-image normalisation** against the base, on val: macro-F1 -0.056, accuracy -0.120 (difference of means); on val-tiles macro-F1 -0.013. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges do not overlap: with 3 and 3 seeds, that is a difference worth taking seriously.
+- **base + post colours histogram-matched to pre** against the base, on val: macro-F1 -0.034, accuracy -0.046 (difference of means); on val-tiles macro-F1 -0.022. The seeds' val macro-F1 ranges do not overlap and their val accuracy ranges do not overlap: with 3 and 3 seeds, that is a difference worth taking seriously.
 
 For scale: always answering no-damage scores 0.878 accuracy on val. The best setting's mean val accuracy is 0.617 (`stack_aug`), still below it.
 
@@ -63,10 +66,14 @@ The triage idea needs the model to be *less sure when it is wrong*, most of all 
 | base: stack, strong augmentation | val-tiles | ensemble | 0.876 | 0.878 | 0.899 | 0.732 | 0.969 |
 | base: stack, strong augmentation | val | single (3 seeds) | 0.617 ± 0.021 (0.604-0.641) | 0.644 ± 0.006 (0.638-0.651) | 0.739 ± 0.008 (0.732-0.748) | 0.331 ± 0.016 (0.321-0.349) | 0.725 ± 0.016 (0.713-0.743) |
 | base: stack, strong augmentation | val | ensemble | 0.640 | 0.630 | 0.746 | 0.345 | 0.740 |
-| base + per-image normalisation | val-tiles | single (2 seeds) | 0.866 ± 0.001 (0.866-0.866) | 0.871 ± 0.001 (0.870-0.872) | 0.904 ± 0.003 (0.902-0.906) | 0.738 ± 0.005 (0.734-0.742) | 0.970 ± 0.002 (0.968-0.971) |
-| base + per-image normalisation | val-tiles | ensemble | 0.871 | 0.875 | 0.904 | 0.741 | 0.974 |
-| base + per-image normalisation | val | single (2 seeds) | 0.480 ± 0.004 (0.477-0.483) | 0.648 ± 0.004 (0.646-0.651) | 0.674 ± 0.008 (0.669-0.680) | 0.257 ± 0.001 (0.256-0.258) | 0.618 ± 0.006 (0.613-0.622) |
-| base + per-image normalisation | val | ensemble | 0.488 | 0.636 | 0.676 | 0.262 | 0.618 |
+| base + per-image normalisation | val-tiles | single (3 seeds) | 0.866 ± 0.000 (0.866-0.866) | 0.870 ± 0.002 (0.868-0.872) | 0.902 ± 0.004 (0.898-0.906) | 0.731 ± 0.013 (0.717-0.742) | 0.969 ± 0.002 (0.968-0.971) |
+| base + per-image normalisation | val-tiles | ensemble | 0.871 | 0.875 | 0.905 | 0.737 | 0.973 |
+| base + per-image normalisation | val | single (3 seeds) | 0.497 ± 0.030 (0.477-0.531) | 0.648 ± 0.003 (0.646-0.651) | 0.679 ± 0.009 (0.669-0.687) | 0.264 ± 0.012 (0.256-0.277) | 0.627 ± 0.016 (0.613-0.645) |
+| base + per-image normalisation | val | ensemble | 0.512 | 0.631 | 0.681 | 0.266 | 0.629 |
+| base + post colours histogram-matched to pre | val-tiles | single (3 seeds) | 0.862 ± 0.001 (0.860-0.863) | 0.869 ± 0.000 (0.869-0.869) | 0.904 ± 0.001 (0.903-0.906) | 0.719 ± 0.006 (0.713-0.723) | 0.973 ± 0.002 (0.970-0.974) |
+| base + post colours histogram-matched to pre | val-tiles | ensemble | 0.867 | 0.874 | 0.905 | 0.730 | 0.974 |
+| base + post colours histogram-matched to pre | val | single (3 seeds) | 0.571 ± 0.020 (0.549-0.586) | 0.654 ± 0.003 (0.652-0.658) | 0.728 ± 0.008 (0.719-0.733) | 0.305 ± 0.010 (0.293-0.312) | 0.696 ± 0.021 (0.673-0.709) |
+| base + post colours histogram-matched to pre | val | ensemble | 0.590 | 0.643 | 0.735 | 0.315 | 0.709 |
 
 **Reading it, for the base setting (`stack_aug`), single model:**
 
@@ -210,5 +217,9 @@ Every run behind sections 2-5, at the epoch that was kept.
 | stack_aug_s2 | 9 of 10 | 0.869 | 0.693 | 0.607 | 0.299 | 0.498 | 6 | 68 | 17.260 | 20.580 | 4.076 |
 | stack_aug_pernorm_s0 | 10 of 10 | 0.866 | 0.679 | 0.483 | 0.247 | 0.461 | 6 | 82 | 17.510 | 17.560 | 4.076 |
 | stack_aug_pernorm_s1 | 9 of 10 | 0.866 | 0.681 | 0.477 | 0.237 | 0.458 | 6 | 69 | 16.890 | 21.760 | 4.076 |
+| stack_aug_pernorm_s2 | 9 of 10 | 0.866 | 0.683 | 0.531 | 0.260 | 0.471 | 6 | 64 | 16.890 | 21.360 | 4.076 |
+| stack_aug_histmatch_s0 | 10 of 10 | 0.863 | 0.673 | 0.549 | 0.261 | 0.465 | 6 | 83 | 16.530 | 22.010 | 4.076 |
+| stack_aug_histmatch_s1 | 10 of 10 | 0.860 | 0.672 | 0.578 | 0.279 | 0.471 | 6 | 87 | 16.530 | 21.270 | 4.076 |
+| stack_aug_histmatch_s2 | 9 of 10 | 0.863 | 0.672 | 0.586 | 0.273 | 0.468 | 6 | 87 | 16.530 | 21.690 | 4.076 |
 
 Per-epoch metrics and memory are in `runs/<run>/log.jsonl` (not in git).

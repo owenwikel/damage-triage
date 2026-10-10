@@ -53,11 +53,17 @@ somewhat optimistic.
 | ensemble of the 3 | probabilities averaged | | | 0.876 / 0.705 | 0.640 / 0.313 |
 | `stack_aug_pernorm_s0` | base + per-image normalisation | 10 of 10 | 0.461 | 0.866 / 0.679 | 0.483 / 0.247 |
 | `stack_aug_pernorm_s1` | same, seed 1 | 9 of 10 | 0.458 | 0.866 / 0.681 | 0.477 / 0.237 |
-| `stack_aug_pernorm_s2` | same, seed 2 | **unfinished** | | | |
+| `stack_aug_pernorm_s2` | same, seed 2 | 9 of 10 | 0.471 | 0.866 / 0.683 | 0.531 / 0.260 |
+| ensemble of the 3 | per-image normalisation | | | 0.871 / 0.690 | 0.512 / 0.246 |
+| `stack_aug_histmatch_s0` | base + histogram matching | 10 of 10 | 0.465 | 0.863 / 0.673 | 0.549 / 0.261 |
+| `stack_aug_histmatch_s1` | same, seed 1 | 10 of 10 | 0.471 | 0.860 / 0.672 | 0.578 / 0.279 |
+| `stack_aug_histmatch_s2` | same, seed 2 | 9 of 10 | 0.468 | 0.863 / 0.672 | 0.586 / 0.273 |
+| ensemble of the 3 | histogram matching | | | 0.867 / 0.683 | 0.590 / 0.276 |
 
-`stack_aug_pernorm_s2` was stopped during epoch 10. It has a `best.pt` (epoch 9) and a
-log but no `metrics.json` and no predictions; nothing uses it. Retrain from the start
-rather than resume.
+The cheap-fix batch is complete (2026-10-09): `stack_aug_pernorm_s2` was retrained from
+the start and the three histogram-matching seeds were trained, all under the rule above.
+**Neither fix helps; both are worse than the base on val and on val-tiles**
+(`docs/results.md` section 2).
 
 ### Trained under the earlier rule only (`runs/old_rule/`)
 
@@ -80,21 +86,23 @@ run. These two rows are not a fair comparison with the base model.
 
 - It is the only setting with three finished seeds under the current rule, and the seeds
   agree (smoothed score 0.496-0.499).
-- Per-image normalisation is clearly worse on val (accuracy 0.480 against 0.617, the
-  seeds' ranges do not overlap) and slightly worse on val-tiles.
+- Per-image normalisation is clearly worse on val (mean accuracy 0.497 against 0.617,
+  macro-F1 0.248 against 0.304; the seeds' ranges do not overlap) and slightly worse on
+  val-tiles.
+- Histogram matching is also worse on val (mean accuracy 0.571, macro-F1 0.271; ranges
+  do not overlap with the base) and on val-tiles (macro-F1 0.672 against 0.694).
 - The ensemble is preferred over any single seed because single seeds range from 0.604
   to 0.641 on val and nothing but val labels says which one is good; the ensemble
   reaches the best seed's level and is the best on val-tiles.
 - **What is not established:** that stack beats siamese, or that strong augmentation
   beats base augmentation. Each was compared on one seed under the old rule, and the
-  gaps were smaller than the seed-to-seed spread. Histogram matching
-  (`configs/stack_aug_histmatch.json`) has never been run.
+  gaps were smaller than the seed-to-seed spread.
 
 ## Saved predictions
 
 | where | what | parts |
 |---|---|---|
-| `outputs/predictions/<run>/<part>.csv` | uid, disaster, tile_id, label, logit_0..3, one row per building; written by `scripts/export_predictions.py` for `stack_aug_s0..2` | train, val-tiles, val |
+| `outputs/predictions/<run>/<part>.csv` | uid, disaster, tile_id, label, logit_0..3, one row per building; written by `scripts/export_predictions.py` for `stack_aug_s0..2`, `stack_aug_histmatch_s0..2` and `stack_aug_pernorm_s2` (not for `stack_aug_pernorm_s0..1`) | train, val-tiles, val |
 | `runs/<run>/preds_<part>.npz` | logits and labels only, in cache order (no ids); written by training | val-tiles, val |
 | `runs/old_rule/stack_aug_s0/mc_dropout_<part>.npz` | MC-dropout summary of the earlier seed-0 model | val-tiles, val |
 
@@ -117,9 +125,6 @@ run. Stale:
   results, and omits the per-image runs, `scripts/gap_diagnosis.py` and
   `scripts/export_predictions.py`. `docs/gap_diagnosis.md` and
   `docs/uncertainty_plan.md` are not linked.
-- **Usage examples that point at a moved run.** The docstrings of `src/calibrate.py`,
-  `scripts/error_analysis.py` and `scripts/demo_figures.py` show
-  `--run runs\siamese_s0`; that run now lives in `runs\old_rule\siamese_s0`.
 - **`SESSION_REPORT.md`** is correct as a log but its lower half describes the old-rule
   runs; read only the "Session 3" part for current numbers.
 - **`docs/results.md` section 6** calls MC dropout "20 times the prediction cost". It is
@@ -129,8 +134,8 @@ run. Stale:
 
 ## Open decisions
 
-1. Finish the cheap-fix batch? Histogram matching (3 seeds) and the third per-image
-   seed, about 1.5 hours. Commands are in `SESSION_REPORT.md`.
+1. Both cheap preprocessing fixes are now tested with 3 seeds and rejected. What next
+   for the val gap?
 2. The model mostly ignores the pre image on the training disasters
    (`docs/gap_diagnosis.md`). Push it towards comparing before more preprocessing?
 3. Retrain siamese and plain stack with 3 seeds under the current rule, so that the

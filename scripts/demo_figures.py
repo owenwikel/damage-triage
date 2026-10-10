@@ -1,7 +1,7 @@
 """Demo figures: what the model says about whole tiles -> outputs/demo/ and docs/demo.md.
 
 Usage:
-    .\\.venv\\Scripts\\python.exe scripts\\demo_figures.py --run runs\\siamese_s0 --data-dir C:\\Users\\wikel\\dev\\xbd-data
+    .\\.venv\\Scripts\\python.exe scripts\\demo_figures.py --run runs\\stack_aug_s0 --data-dir C:\\Users\\wikel\\dev\\xbd-data
 
 For six validation tiles from six different disasters, draws three panels:
     before                      the pre-disaster image
