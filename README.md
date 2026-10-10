@@ -191,7 +191,7 @@ All settings, with spread over seeds: [docs/results.md](docs/results.md).
 
 ```powershell
 $py = ".\.venv\Scripts\python.exe"
-$data = "C:\Users\wikel\dev\xbd-data"
+$data = "<path to xbd-data>"
 
 # 1. crop cache (train, val-tiles, val; never test)
 & $py scripts\build_crops.py --data-dir $data
